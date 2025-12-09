@@ -1,0 +1,16 @@
+[project]
+name = "app"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    "agno>=2.3.8",
+    "environs>=14.5.0",
+    "fastapi[standard]>=0.124.0",
+    "huey>=2.5.5",
+    "openai>=2.9.0",
+    "pyyaml>=6.0.3",
+    "rendercv[full]>=2.3",
+    "sqlmodel>=0.0.27",
+]
