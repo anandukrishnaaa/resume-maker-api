@@ -53,12 +53,111 @@ env.read_env()
 api_key = env.str("OPENROUTER_API_KEY", "your-key-here")
 API_TOKEN = "secret-token-123"
 
-app = FastAPI(title="Resume Generator AI")
+app = FastAPI(title="Resume Generator AI", version="1.0.0")
 
 # ============================================================================
 # Huey Configuration (Task Queue)
 # ============================================================================
 huey = SqliteHuey(filename="tmp/huey_queue.db")
+
+
+# ============================================================================
+# Pydantic Models for Nested Structures
+# ============================================================================
+class SocialNetworkInput(BaseModel):
+    """Social network profile"""
+
+    network: str = Field(..., example="LinkedIn")
+    username: str = Field(..., example="johndoe")
+
+
+class EducationInput(BaseModel):
+    """Education entry for profile"""
+
+    institution: str = Field(..., example="Indian Institute of Technology")
+    area: str = Field(..., example="Computer Science")
+    degree: str = Field(..., example="B.Tech")
+    start_date: str = Field(..., example="2018-08")
+    end_date: str = Field(..., example="2022-05")
+    highlights: Optional[List[str]] = Field(
+        default=None, example=["GPA: 3.8/4.0", "President of Computer Science Club"]
+    )
+    location: Optional[str] = Field(default=None, example="Mumbai, India")
+
+
+class ExperienceInput(BaseModel):
+    """Experience entry for profile"""
+
+    company: str = Field(..., example="TechCorp India")
+    position: str = Field(..., example="Software Engineer")
+    start_date: str = Field(..., example="2022-06")
+    end_date: str = Field(..., example="present")
+    location: Optional[str] = Field(default=None, example="Bangalore, India")
+    highlights: Optional[List[str]] = Field(
+        default=None,
+        example=[
+            "Developed scalable microservices using Python and FastAPI",
+            "Reduced API response time by 40%",
+        ],
+    )
+
+
+class SkillsInput(BaseModel):
+    """Skills organized by category"""
+
+    languages: Optional[List[str]] = Field(
+        default=None, example=["Python", "JavaScript", "Go"]
+    )
+    frameworks: Optional[List[str]] = Field(
+        default=None, example=["FastAPI", "React", "Django"]
+    )
+    tools: Optional[List[str]] = Field(
+        default=None, example=["Docker", "Kubernetes", "AWS"]
+    )
+    databases: Optional[List[str]] = Field(
+        default=None, example=["PostgreSQL", "MongoDB", "Redis"]
+    )
+
+    class Config:
+        # Allow additional fields for custom categories
+        extra = "allow"
+
+
+class ProfileDataInput(BaseModel):
+    """Complete profile data structure"""
+
+    education: Optional[List[EducationInput]] = Field(
+        default=None,
+        example=[
+            {
+                "institution": "Indian Institute of Technology",
+                "area": "Computer Science",
+                "degree": "B.Tech",
+                "start_date": "2018-08",
+                "end_date": "2022-05",
+                "highlights": ["GPA: 3.8/4.0"],
+            }
+        ],
+    )
+    experience: Optional[List[ExperienceInput]] = Field(
+        default=None,
+        example=[
+            {
+                "company": "TechCorp",
+                "position": "Software Engineer",
+                "start_date": "2022-06",
+                "end_date": "present",
+                "highlights": ["Built scalable APIs"],
+            }
+        ],
+    )
+    skills: Optional[SkillsInput] = Field(
+        default=None,
+        example={
+            "languages": ["Python", "JavaScript"],
+            "frameworks": ["FastAPI", "React"],
+        },
+    )
 
 
 # ============================================================================
@@ -184,7 +283,7 @@ class ResumeContent(SQLModel, table=True):
     locale_config: Optional[str] = None  # JSON string of locale overrides
     rendercv_settings: Optional[str] = None  # JSON string of rendercv settings
     ai_model: Optional[str] = None
-    improvement_remarks: Optional[str] = None  # NEW: Remarks used for regeneration
+    improvement_remarks: Optional[str] = None
     created_at: datetime = SQLField(default_factory=datetime.now)
 
 
@@ -240,101 +339,157 @@ async def get_user_id(x_user_id: str = Header(...)) -> str:
 class CreateUserRequest(BaseModel):
     """Request to create a new user with personal info"""
 
-    name: str
-    email: str
-    phone: str
-    country_code: str = "+91"
-    location: str
-    social_networks: Optional[List[Dict[str, str]]] = None
-    profile_data: Optional[Dict[str, Any]] = None  # Optional initial work history
+    name: str = Field(..., example="John Doe")
+    email: str = Field(..., example="john.doe@example.com")
+    phone: str = Field(..., example="9876543210")
+    country_code: str = Field(default="+91", example="+91")
+    location: str = Field(..., example="Mumbai, India")
+    social_networks: Optional[List[SocialNetworkInput]] = Field(
+        default=None,
+        example=[
+            {"network": "LinkedIn", "username": "johndoe"},
+            {"network": "GitHub", "username": "johndoe-dev"},
+        ],
+    )
+    profile_data: Optional[ProfileDataInput] = Field(
+        default=None,
+        example={
+            "education": [
+                {
+                    "institution": "IIT Bombay",
+                    "area": "Computer Science",
+                    "degree": "B.Tech",
+                    "start_date": "2018-08",
+                    "end_date": "2022-05",
+                }
+            ],
+            "experience": [
+                {
+                    "company": "TechCorp",
+                    "position": "Software Engineer",
+                    "start_date": "2022-06",
+                    "end_date": "present",
+                    "highlights": ["Built scalable APIs"],
+                }
+            ],
+            "skills": {
+                "languages": ["Python", "JavaScript"],
+                "frameworks": ["FastAPI", "React"],
+            },
+        },
+    )
+
+    class Config:
+        schema_extra = {
+            "example": {
+                "name": "John Doe",
+                "email": "john.doe@example.com",
+                "phone": "9876543210",
+                "country_code": "+91",
+                "location": "Mumbai, India",
+                "social_networks": [
+                    {"network": "LinkedIn", "username": "johndoe"},
+                    {"network": "GitHub", "username": "johndoe-dev"},
+                ],
+                "profile_data": {
+                    "education": [
+                        {
+                            "institution": "Indian Institute of Technology",
+                            "area": "Computer Science",
+                            "degree": "B.Tech",
+                            "start_date": "2018-08",
+                            "end_date": "2022-05",
+                            "highlights": ["GPA: 3.8/4.0"],
+                        }
+                    ],
+                    "experience": [
+                        {
+                            "company": "TechCorp India",
+                            "position": "Software Engineer",
+                            "start_date": "2022-06",
+                            "end_date": "present",
+                            "location": "Bangalore, India",
+                            "highlights": [
+                                "Developed scalable microservices using Python",
+                                "Reduced API response time by 40%",
+                            ],
+                        }
+                    ],
+                    "skills": {
+                        "languages": ["Python", "JavaScript", "Go"],
+                        "frameworks": ["FastAPI", "React", "Django"],
+                        "tools": ["Docker", "Kubernetes", "AWS"],
+                    },
+                },
+            }
+        }
 
 
 class JobRequest(BaseModel):
-    title: str
-    company: str
-    description: str
-    ai_model: Optional[str] = None
-    design_config: Optional[Dict[str, Any]] = None
-    locale_config: Optional[Dict[str, Any]] = None
-    rendercv_settings: Optional[Dict[str, Any]] = None
+    title: str = Field(..., example="Senior Backend Engineer")
+    company: str = Field(..., example="BigTech Corp")
+    description: str = Field(
+        ...,
+        example="""We are looking for a Senior Backend Engineer to join our team.
+
+Requirements:
+- 3+ years of experience with Python
+- Experience with FastAPI or Django
+- Strong knowledge of microservices architecture
+- Experience with AWS or GCP
+
+Responsibilities:
+- Design and implement scalable backend services
+- Mentor junior developers
+- Collaborate with frontend team""",
+    )
+    ai_model: Optional[str] = Field(
+        default=None,
+        example="google/gemini-2.5-flash-lite",
+        description="AI model to use (e.g., anthropic/claude-3.5-sonnet, openai/gpt-4)",
+    )
+    design_config: Optional[Dict[str, Any]] = Field(
+        default=None,
+        example={"theme": "moderncv", "colors": {"section_titles": "rgb(200, 0, 0)"}},
+        description="Custom design configuration (overrides theme defaults)",
+    )
+    locale_config: Optional[Dict[str, Any]] = Field(default=None)
+    rendercv_settings: Optional[Dict[str, Any]] = Field(default=None)
 
 
 class RegenerateResumeRequest(BaseModel):
     """Request to regenerate resume from existing task with new configs"""
 
-    ai_model: Optional[str] = None
-    design_config: Optional[Dict[str, Any]] = None
+    ai_model: Optional[str] = Field(default=None, example="anthropic/claude-3.5-sonnet")
+    design_config: Optional[Dict[str, Any]] = Field(
+        default=None,
+        example={"theme": "sb2nov", "colors": {"name": "rgb(0, 100, 200)"}},
+    )
     locale_config: Optional[Dict[str, Any]] = None
     rendercv_settings: Optional[Dict[str, Any]] = None
-    improvement_remarks: Optional[str] = (
-        None  # NEW: Instructions for AI to improve resume
+    improvement_remarks: Optional[str] = Field(
+        default=None,
+        example="Make the summary more concise and add quantifiable metrics to achievements. Emphasize leadership experience.",
     )
 
 
 class PersonalInfoUpdate(BaseModel):
-    name: str
-    email: str
-    phone: str
-    country_code: str
-    location: str
-    social_networks: Optional[List[Dict[str, str]]] = None
+    name: str = Field(..., example="John Doe")
+    email: str = Field(..., example="john.doe@example.com")
+    phone: str = Field(..., example="9876543210")
+    country_code: str = Field(..., example="+91")
+    location: str = Field(..., example="Mumbai, India")
+    social_networks: Optional[List[SocialNetworkInput]] = Field(
+        default=None, example=[{"network": "LinkedIn", "username": "johndoe"}]
+    )
 
 
 class ProfileDataUpdate(BaseModel):
     """Update user's work history, education, skills"""
 
-    education: Optional[List[Dict[str, Any]]] = None
-    experience: Optional[List[Dict[str, Any]]] = None
-    skills: Optional[Dict[str, List[str]]] = None
-
-
-class TaskResponse(BaseModel):
-    task_id: str
-    status: str
-    message: str
-
-
-class AnalysisContentResponse(BaseModel):
-    task_id: str
-    job_id: int
-    analysis_text: str
-    ai_model: Optional[str] = None
-
-
-class ResumeContentResponse(BaseModel):
-    task_id: str
-    job_id: int
-    content: Dict[str, Any]
-    design_config: Optional[Dict[str, Any]] = None
-    locale_config: Optional[Dict[str, Any]] = None
-    rendercv_settings: Optional[Dict[str, Any]] = None
-    ai_model: Optional[str] = None
-    improvement_remarks: Optional[str] = None
-    created_at: datetime
-
-
-class StatusResponse(BaseModel):
-    task_id: str
-    status: str
-    logs: List[str]
-    total_tokens: int
-    pdf_url: Optional[str] = None
-    output_folder: Optional[str] = None
-    ai_model: Optional[str] = None
-
-
-class StatsResponse(BaseModel):
-    total_tasks: int
-    total_tokens_used: int
-    recent_tasks: List[Dict[str, Any]]
-
-
-class UserProfileResponse(BaseModel):
-    user_id: str
-    profile_data: Dict[str, Any]
-    personal_info: Dict[str, Any]
-    created_at: datetime
-    updated_at: datetime
+    education: Optional[List[EducationInput]] = None
+    experience: Optional[List[ExperienceInput]] = None
+    skills: Optional[SkillsInput] = None
 
 
 # ============================================================================
@@ -563,51 +718,66 @@ def process_resume_task(
             if not analysis:
                 raise ValueError("No analysis found")
 
-            # 1. AI Generation
-            generator = create_resume_generator_agent(
-                ai_model_override or task.ai_model
-            )
+            # Check if we can reuse existing content (optimization)
+            existing_resume = session.exec(
+                select(ResumeContent)
+                .where(ResumeContent.job_id == task.job_id)
+                .where(ResumeContent.user_id == task.user_id)
+                .order_by(ResumeContent.created_at.desc())
+            ).first()
 
-            # Build prompt with optional improvement remarks
-            prompt = f"Generate Resume Content for:\nJOB: {jd.title}\nANALYSIS: {analysis.analysis_text}\nUSER: {user.profile_data}"
+            sections_dict = None
+            tokens_used = 0
 
-            if improvement_remarks:
-                # Check if there's existing resume content to improve upon
-                existing_resume = session.exec(
-                    select(ResumeContent)
-                    .where(ResumeContent.job_id == task.job_id)
-                    .where(ResumeContent.user_id == task.user_id)
-                    .order_by(ResumeContent.created_at.desc())
-                ).first()
-
-                if existing_resume:
-                    prompt += f"\n\nPREVIOUS RESUME CONTENT:\n{existing_resume.content}"
-
-                prompt += f"\n\nIMPROVEMENT INSTRUCTIONS:\n{improvement_remarks}\n\nPlease improve the resume based on the above instructions."
+            # OPTIMIZATION: Only call AI if we have improvement remarks OR no existing content
+            if improvement_remarks or not existing_resume:
                 task.logs.append(
-                    f"[{datetime.now()}] Regenerating with improvement remarks"
+                    f"[{datetime.now()}] Calling AI to generate/improve content"
                 )
 
-            response = generator.run(prompt)
-            resume_sections_obj = response.content
+                # 1. AI Generation
+                generator = create_resume_generator_agent(
+                    ai_model_override or task.ai_model
+                )
 
-            # Metrics
-            tokens = 0
-            if response.metrics:
-                try:
-                    tokens = response.metrics.to_dict().get("total_tokens", 0)
-                except:
-                    tokens = getattr(response.metrics, "total_tokens", 0)
+                # Build prompt with optional improvement remarks
+                prompt = f"Generate Resume Content for:\nJOB: {jd.title}\nANALYSIS: {analysis.analysis_text}\nUSER: {user.profile_data}"
 
-            task.total_tokens += int(tokens)
-            task.logs.append(
-                f"[{datetime.now()}] Structured content generated. Tokens: {tokens}"
-            )
+                if improvement_remarks and existing_resume:
+                    prompt += f"\n\nPREVIOUS RESUME CONTENT:\n{existing_resume.content}"
+                    prompt += f"\n\nIMPROVEMENT INSTRUCTIONS:\n{improvement_remarks}\n\nPlease improve the resume based on the above instructions."
+                    task.logs.append(
+                        f"[{datetime.now()}] Regenerating with improvement remarks"
+                    )
 
-            # 2. Convert to dict and store in DB
-            sections_dict = resume_sections_obj.model_dump(exclude_none=True)
+                response = generator.run(prompt)
+                resume_sections_obj = response.content
 
-            # Store AI-generated resume content with configs
+                # Metrics
+                if response.metrics:
+                    try:
+                        tokens_used = response.metrics.to_dict().get("total_tokens", 0)
+                    except:
+                        tokens_used = getattr(response.metrics, "total_tokens", 0)
+
+                task.total_tokens += int(tokens_used)
+                task.logs.append(
+                    f"[{datetime.now()}] Structured content generated. Tokens: {tokens_used}"
+                )
+
+                # Convert to dict
+                sections_dict = resume_sections_obj.model_dump(exclude_none=True)
+            else:
+                # REUSE existing AI-generated content
+                task.logs.append(
+                    f"[{datetime.now()}] Reusing existing AI-generated content (design-only change)"
+                )
+                sections_dict = json.loads(existing_resume.content)
+                task.logs.append(
+                    f"[{datetime.now()}] No AI call needed - saved tokens!"
+                )
+
+            # 2. Store resume content with configs
             resume_content = ResumeContent(
                 user_id=task.user_id,
                 task_id=task_id,
@@ -726,7 +896,7 @@ def on_startup():
     create_db_and_tables()
 
 
-@app.post("/users", dependencies=[Depends(verify_api_key)])
+@app.post("/users", dependencies=[Depends(verify_api_key)], response_model=APIResponse)
 def create_user(
     request: CreateUserRequest,
     user_id: str = Depends(get_user_id),
@@ -742,9 +912,11 @@ def create_user(
             success=False, message="User already exists", error="USER_EXISTS"
         )
 
-    # Create user profile with provided or default data
+    # Convert Pydantic models to dictionaries for storage
     if request.profile_data:
-        profile_data_json = json.dumps(request.profile_data)
+        profile_data_json = json.dumps(
+            request.profile_data.model_dump(exclude_none=True)
+        )
     else:
         # Default empty profile
         default_profile = {
@@ -760,6 +932,10 @@ def create_user(
     session.refresh(user)
 
     # Create personal info with provided data
+    social_networks_list = []
+    if request.social_networks:
+        social_networks_list = [sn.model_dump() for sn in request.social_networks]
+
     personal = PersonalInfo(
         user_id=user_id,
         name=request.name,
@@ -767,7 +943,7 @@ def create_user(
         phone=request.phone,
         country_code=request.country_code,
         location=request.location,
-        social_networks=json.dumps(request.social_networks or []),
+        social_networks=json.dumps(social_networks_list),
     )
     session.add(personal)
     session.commit()
@@ -785,7 +961,9 @@ def create_user(
     )
 
 
-@app.get("/users/me", dependencies=[Depends(verify_api_key)])
+@app.get(
+    "/users/me", dependencies=[Depends(verify_api_key)], response_model=APIResponse
+)
 def get_user_profile(
     user_id: str = Depends(get_user_id), session: Session = Depends(get_session)
 ):
@@ -812,7 +990,11 @@ def get_user_profile(
     )
 
 
-@app.put("/users/me/contact", dependencies=[Depends(verify_api_key)])
+@app.put(
+    "/users/me/contact",
+    dependencies=[Depends(verify_api_key)],
+    response_model=APIResponse,
+)
 def update_personal_info(
     data: PersonalInfoUpdate,
     user_id: str = Depends(get_user_id),
@@ -828,7 +1010,8 @@ def update_personal_info(
     personal.location = data.location
 
     if data.social_networks:
-        personal.social_networks = json.dumps(data.social_networks)
+        social_networks_list = [sn.model_dump() for sn in data.social_networks]
+        personal.social_networks = json.dumps(social_networks_list)
 
     personal.updated_at = datetime.now()
     session.add(personal)
@@ -841,7 +1024,11 @@ def update_personal_info(
     )
 
 
-@app.put("/users/me/profile", dependencies=[Depends(verify_api_key)])
+@app.put(
+    "/users/me/profile",
+    dependencies=[Depends(verify_api_key)],
+    response_model=APIResponse,
+)
 def update_profile_data(
     data: ProfileDataUpdate,
     user_id: str = Depends(get_user_id),
@@ -853,11 +1040,15 @@ def update_profile_data(
     current_data = json.loads(user.profile_data)
 
     if data.education is not None:
-        current_data["education"] = data.education
+        current_data["education"] = [
+            edu.model_dump(exclude_none=True) for edu in data.education
+        ]
     if data.experience is not None:
-        current_data["experience"] = data.experience
+        current_data["experience"] = [
+            exp.model_dump(exclude_none=True) for exp in data.experience
+        ]
     if data.skills is not None:
-        current_data["skills"] = data.skills
+        current_data["skills"] = data.skills.model_dump(exclude_none=True)
 
     user.profile_data = json.dumps(current_data)
     user.updated_at = datetime.now()
@@ -875,7 +1066,7 @@ def update_profile_data(
 # ============================================================================
 # API Endpoints - Job Management
 # ============================================================================
-@app.get("/jobs", dependencies=[Depends(verify_api_key)])
+@app.get("/jobs", dependencies=[Depends(verify_api_key)], response_model=APIResponse)
 def list_jobs(
     user_id: str = Depends(get_user_id), session: Session = Depends(get_session)
 ):
@@ -905,7 +1096,7 @@ def list_jobs(
     )
 
 
-@app.post("/jobs", dependencies=[Depends(verify_api_key)])
+@app.post("/jobs", dependencies=[Depends(verify_api_key)], response_model=APIResponse)
 def create_job_with_analysis(
     request: JobRequest,
     user_id: str = Depends(get_user_id),
@@ -1010,7 +1201,9 @@ def create_job_with_analysis(
     )
 
 
-@app.post("/jobs/complete", dependencies=[Depends(verify_api_key)])
+@app.post(
+    "/jobs/complete", dependencies=[Depends(verify_api_key)], response_model=APIResponse
+)
 def create_job_with_resume(
     request: JobRequest,
     user_id: str = Depends(get_user_id),
@@ -1128,7 +1321,7 @@ def create_job_with_resume(
 # ============================================================================
 # API Endpoints - Task Management
 # ============================================================================
-@app.get("/tasks", dependencies=[Depends(verify_api_key)])
+@app.get("/tasks", dependencies=[Depends(verify_api_key)], response_model=APIResponse)
 def list_tasks(
     user_id: str = Depends(get_user_id), session: Session = Depends(get_session)
 ):
@@ -1160,7 +1353,11 @@ def list_tasks(
     )
 
 
-@app.get("/tasks/{task_id}", dependencies=[Depends(verify_api_key)])
+@app.get(
+    "/tasks/{task_id}",
+    dependencies=[Depends(verify_api_key)],
+    response_model=APIResponse,
+)
 def get_task(
     task_id: str,
     user_id: str = Depends(get_user_id),
@@ -1192,7 +1389,11 @@ def get_task(
     )
 
 
-@app.get("/tasks/{task_id}/analysis", dependencies=[Depends(verify_api_key)])
+@app.get(
+    "/tasks/{task_id}/analysis",
+    dependencies=[Depends(verify_api_key)],
+    response_model=APIResponse,
+)
 def get_task_analysis(
     task_id: str,
     user_id: str = Depends(get_user_id),
@@ -1229,7 +1430,11 @@ def get_task_analysis(
     )
 
 
-@app.get("/tasks/{task_id}/resume", dependencies=[Depends(verify_api_key)])
+@app.get(
+    "/tasks/{task_id}/resume",
+    dependencies=[Depends(verify_api_key)],
+    response_model=APIResponse,
+)
 def get_task_resume(
     task_id: str,
     user_id: str = Depends(get_user_id),
@@ -1270,7 +1475,11 @@ def get_task_resume(
     )
 
 
-@app.post("/tasks/{task_id}/resume", dependencies=[Depends(verify_api_key)])
+@app.post(
+    "/tasks/{task_id}/resume",
+    dependencies=[Depends(verify_api_key)],
+    response_model=APIResponse,
+)
 def create_task_resume(
     task_id: str,
     request: Optional[RegenerateResumeRequest] = None,
@@ -1321,7 +1530,11 @@ def create_task_resume(
     )
 
 
-@app.post("/tasks/{task_id}/regenerate", dependencies=[Depends(verify_api_key)])
+@app.post(
+    "/tasks/{task_id}/regenerate",
+    dependencies=[Depends(verify_api_key)],
+    response_model=APIResponse,
+)
 def regenerate_task_resume(
     task_id: str,
     request: RegenerateResumeRequest,
@@ -1409,7 +1622,11 @@ def download_task_pdf(
 # ============================================================================
 # API Endpoints - Statistics
 # ============================================================================
-@app.get("/users/me/stats", dependencies=[Depends(verify_api_key)])
+@app.get(
+    "/users/me/stats",
+    dependencies=[Depends(verify_api_key)],
+    response_model=APIResponse,
+)
 def get_user_stats(
     user_id: str = Depends(get_user_id), session: Session = Depends(get_session)
 ):
