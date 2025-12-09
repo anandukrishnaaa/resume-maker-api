@@ -1,5 +1,5 @@
 """
-AI-Powered Resume Generator API with Multi-User Support
+AI-Powered Resume Generator API with Multi-User Support and REST-Compliant Endpoints
 """
 
 import os
@@ -115,13 +115,25 @@ class ResumeSections(BaseModel):
 
 
 # ============================================================================
+# Standardized API Response Models
+# ============================================================================
+class APIResponse(BaseModel):
+    """Standard API response wrapper"""
+
+    success: bool
+    message: str
+    data: Optional[Dict[str, Any]] = None
+    error: Optional[str] = None
+
+
+# ============================================================================
 # Database Models with Multi-User Support
 # ============================================================================
 class UserProfile(SQLModel, table=True):
     """Stores user-specific profile information"""
 
     id: Optional[int] = SQLField(default=None, primary_key=True)
-    user_id: str = SQLField(index=True, unique=True)  # External user identifier
+    user_id: str = SQLField(index=True, unique=True)
     profile_data: str  # JSON string of work history, skills, etc.
     created_at: datetime = SQLField(default_factory=datetime.now)
     updated_at: datetime = SQLField(default_factory=datetime.now)
@@ -143,21 +155,20 @@ class PersonalInfo(SQLModel, table=True):
 
 class JobDescription(SQLModel, table=True):
     id: Optional[int] = SQLField(default=None, primary_key=True)
-    user_id: str = SQLField(foreign_key="userprofile.user_id", index=True)  # NEW
+    user_id: str = SQLField(foreign_key="userprofile.user_id", index=True)
     title: str
     company: str
     description: str
-    content_hash: str = SQLField(
-        index=True
-    )  # Removed unique=True to allow per-user duplicates
+    content_hash: str = SQLField(index=True)
     created_at: datetime = SQLField(default_factory=datetime.now)
 
 
 class JobAnalysis(SQLModel, table=True):
     id: Optional[int] = SQLField(default=None, primary_key=True)
-    user_id: str = SQLField(foreign_key="userprofile.user_id", index=True)  # NEW
+    user_id: str = SQLField(foreign_key="userprofile.user_id", index=True)
     job_id: int = SQLField(foreign_key="jobdescription.id")
     analysis_text: str
+    ai_model: Optional[str] = None
     created_at: datetime = SQLField(default_factory=datetime.now)
 
 
@@ -165,10 +176,15 @@ class ResumeContent(SQLModel, table=True):
     """Stores the AI-generated resume JSON"""
 
     id: Optional[int] = SQLField(default=None, primary_key=True)
-    user_id: str = SQLField(foreign_key="userprofile.user_id", index=True)  # NEW
+    user_id: str = SQLField(foreign_key="userprofile.user_id", index=True)
     task_id: str = SQLField(foreign_key="tasklog.task_id", index=True)
     job_id: int = SQLField(foreign_key="jobdescription.id")
     content: str  # JSON string of ResumeSections
+    design_config: Optional[str] = None  # JSON string of design overrides
+    locale_config: Optional[str] = None  # JSON string of locale overrides
+    rendercv_settings: Optional[str] = None  # JSON string of rendercv settings
+    ai_model: Optional[str] = None
+    improvement_remarks: Optional[str] = None  # NEW: Remarks used for regeneration
     created_at: datetime = SQLField(default_factory=datetime.now)
 
 
@@ -176,13 +192,14 @@ class TaskLog(SQLModel, table=True):
     """Tracks the lifecycle of a request via UUID"""
 
     task_id: str = SQLField(primary_key=True, index=True)
-    user_id: str = SQLField(foreign_key="userprofile.user_id", index=True)  # NEW
+    user_id: str = SQLField(foreign_key="userprofile.user_id", index=True)
     job_id: Optional[int] = SQLField(default=None, foreign_key="jobdescription.id")
     status: str = SQLField(default="pending")
     total_tokens: int = SQLField(default=0)
     logs: List[str] = SQLField(default=[], sa_column=Column(JSON))
-    output_folder: Optional[str] = None  # NEW: Stores "output/{task_id}/"
+    output_folder: Optional[str] = None
     pdf_path: Optional[str] = None
+    ai_model: Optional[str] = None
     created_at: datetime = SQLField(default_factory=datetime.now)
     updated_at: datetime = SQLField(default_factory=datetime.now)
 
@@ -220,10 +237,38 @@ async def get_user_id(x_user_id: str = Header(...)) -> str:
 # ============================================================================
 # API Input Models
 # ============================================================================
+class CreateUserRequest(BaseModel):
+    """Request to create a new user with personal info"""
+
+    name: str
+    email: str
+    phone: str
+    country_code: str = "+91"
+    location: str
+    social_networks: Optional[List[Dict[str, str]]] = None
+    profile_data: Optional[Dict[str, Any]] = None  # Optional initial work history
+
+
 class JobRequest(BaseModel):
     title: str
     company: str
     description: str
+    ai_model: Optional[str] = None
+    design_config: Optional[Dict[str, Any]] = None
+    locale_config: Optional[Dict[str, Any]] = None
+    rendercv_settings: Optional[Dict[str, Any]] = None
+
+
+class RegenerateResumeRequest(BaseModel):
+    """Request to regenerate resume from existing task with new configs"""
+
+    ai_model: Optional[str] = None
+    design_config: Optional[Dict[str, Any]] = None
+    locale_config: Optional[Dict[str, Any]] = None
+    rendercv_settings: Optional[Dict[str, Any]] = None
+    improvement_remarks: Optional[str] = (
+        None  # NEW: Instructions for AI to improve resume
+    )
 
 
 class PersonalInfoUpdate(BaseModel):
@@ -253,12 +298,18 @@ class AnalysisContentResponse(BaseModel):
     task_id: str
     job_id: int
     analysis_text: str
+    ai_model: Optional[str] = None
 
 
 class ResumeContentResponse(BaseModel):
     task_id: str
     job_id: int
     content: Dict[str, Any]
+    design_config: Optional[Dict[str, Any]] = None
+    locale_config: Optional[Dict[str, Any]] = None
+    rendercv_settings: Optional[Dict[str, Any]] = None
+    ai_model: Optional[str] = None
+    improvement_remarks: Optional[str] = None
     created_at: datetime
 
 
@@ -268,7 +319,8 @@ class StatusResponse(BaseModel):
     logs: List[str]
     total_tokens: int
     pdf_url: Optional[str] = None
-    output_folder: Optional[str] = None  # NEW
+    output_folder: Optional[str] = None
+    ai_model: Optional[str] = None
 
 
 class StatsResponse(BaseModel):
@@ -288,19 +340,21 @@ class UserProfileResponse(BaseModel):
 # ============================================================================
 # AI Agents & Helpers
 # ============================================================================
-def get_openrouter_model():
+def get_openrouter_model(model_id: Optional[str] = None):
+    """Get OpenRouter model with optional custom model ID"""
+    default_model = "google/gemini-2.5-flash-lite"
     return OpenAIChat(
-        id="google/gemini-2.5-flash-lite",
+        id=model_id or default_model,
         api_key=api_key,
         base_url="https://openrouter.ai/api/v1",
     )
 
 
-def create_jd_analyzer_agent() -> Agent:
+def create_jd_analyzer_agent(model_id: Optional[str] = None) -> Agent:
     db = SqliteDb(db_file="tmp/agents.db", session_table="jd_analyzer_sessions")
     return Agent(
         name="JD Analyzer",
-        model=get_openrouter_model(),
+        model=get_openrouter_model(model_id),
         instructions=[
             "You are an expert job description analyzer.",
             "Analyze the provided job description and extract key insights.",
@@ -312,11 +366,11 @@ def create_jd_analyzer_agent() -> Agent:
     )
 
 
-def create_resume_generator_agent() -> Agent:
+def create_resume_generator_agent(model_id: Optional[str] = None) -> Agent:
     db = SqliteDb(db_file="tmp/agents.db", session_table="resume_generator_sessions")
     return Agent(
         name="Resume Generator",
-        model=get_openrouter_model(),
+        model=get_openrouter_model(model_id),
         instructions=[
             "You are an expert resume writer.",
             "You will be given a Job Description, an AI Analysis of that job, and a User Profile.",
@@ -410,10 +464,11 @@ def process_analysis_task(
     description: str,
     job_id: int,
     auto_resume: bool = False,
+    ai_model: Optional[str] = None,
 ):
     """Background task: Runs AI analysis. Can optionally trigger resume generation."""
     logger.info(
-        f"--- Starting Analysis Task: {task_id} (User: {user_id}, Auto-Resume: {auto_resume}) ---"
+        f"--- Starting Analysis Task: {task_id} (User: {user_id}, Model: {ai_model or 'default'}, Auto-Resume: {auto_resume}) ---"
     )
 
     with Session(engine) as session:
@@ -423,16 +478,22 @@ def process_analysis_task(
 
         try:
             task.status = "analysis_in_progress"
-            task.logs.append(f"[{datetime.now()}] Analysis started (Worker)")
+            task.ai_model = ai_model
+            task.logs.append(
+                f"[{datetime.now()}] Analysis started (Worker, Model: {ai_model or 'default'})"
+            )
             session.add(task)
             session.commit()
 
-            analyzer = create_jd_analyzer_agent()
+            analyzer = create_jd_analyzer_agent(ai_model)
             prompt = f"Analyze:\nTitle: {title}\nCompany: {company}\n\n{description}"
             response = analyzer.run(prompt)
 
             analysis = JobAnalysis(
-                user_id=user_id, job_id=job_id, analysis_text=response.content
+                user_id=user_id,
+                job_id=job_id,
+                analysis_text=response.content,
+                ai_model=ai_model,
             )
             session.add(analysis)
 
@@ -462,7 +523,14 @@ def process_analysis_task(
 
 
 @huey.task()
-def process_resume_task(task_id: str):
+def process_resume_task(
+    task_id: str,
+    design_override: Optional[Dict] = None,
+    locale_override: Optional[Dict] = None,
+    rendercv_settings_override: Optional[Dict] = None,
+    ai_model_override: Optional[str] = None,
+    improvement_remarks: Optional[str] = None,
+):
     """Background task: Generates JSON -> YAML -> PDF in dedicated folder per task"""
     logger.info(f"--- Starting Resume Task: {task_id} ---")
 
@@ -474,6 +542,11 @@ def process_resume_task(task_id: str):
         try:
             task.status = "resume_in_progress"
             task.logs.append(f"[{datetime.now()}] Resume generation started (Worker)")
+
+            # Update AI model if provided
+            if ai_model_override:
+                task.ai_model = ai_model_override
+
             session.add(task)
             session.commit()
 
@@ -491,8 +564,30 @@ def process_resume_task(task_id: str):
                 raise ValueError("No analysis found")
 
             # 1. AI Generation
-            generator = create_resume_generator_agent()
+            generator = create_resume_generator_agent(
+                ai_model_override or task.ai_model
+            )
+
+            # Build prompt with optional improvement remarks
             prompt = f"Generate Resume Content for:\nJOB: {jd.title}\nANALYSIS: {analysis.analysis_text}\nUSER: {user.profile_data}"
+
+            if improvement_remarks:
+                # Check if there's existing resume content to improve upon
+                existing_resume = session.exec(
+                    select(ResumeContent)
+                    .where(ResumeContent.job_id == task.job_id)
+                    .where(ResumeContent.user_id == task.user_id)
+                    .order_by(ResumeContent.created_at.desc())
+                ).first()
+
+                if existing_resume:
+                    prompt += f"\n\nPREVIOUS RESUME CONTENT:\n{existing_resume.content}"
+
+                prompt += f"\n\nIMPROVEMENT INSTRUCTIONS:\n{improvement_remarks}\n\nPlease improve the resume based on the above instructions."
+                task.logs.append(
+                    f"[{datetime.now()}] Regenerating with improvement remarks"
+                )
+
             response = generator.run(prompt)
             resume_sections_obj = response.content
 
@@ -512,12 +607,19 @@ def process_resume_task(task_id: str):
             # 2. Convert to dict and store in DB
             sections_dict = resume_sections_obj.model_dump(exclude_none=True)
 
-            # Store AI-generated resume content
+            # Store AI-generated resume content with configs
             resume_content = ResumeContent(
                 user_id=task.user_id,
                 task_id=task_id,
                 job_id=task.job_id,
                 content=json.dumps(sections_dict),
+                design_config=json.dumps(design_override) if design_override else None,
+                locale_config=json.dumps(locale_override) if locale_override else None,
+                rendercv_settings=json.dumps(rendercv_settings_override)
+                if rendercv_settings_override
+                else None,
+                ai_model=ai_model_override or task.ai_model,
+                improvement_remarks=improvement_remarks,
             )
             session.add(resume_content)
             session.commit()
@@ -538,7 +640,7 @@ def process_resume_task(task_id: str):
                 "-", ""
             ).replace(" ", "")
 
-            # Assemble Full Resume Data
+            # Assemble Full Resume Data - ONLY add design config if provided (don't merge with defaults)
             full_cv_dict = {
                 "cv": {
                     "name": personal.name,
@@ -546,9 +648,21 @@ def process_resume_task(task_id: str):
                     "email": personal.email,
                     "phone": full_phone,
                     "sections": sections_dict,
-                },
-                "design": {"theme": "classic"},
+                }
             }
+
+            # ONLY add design config if user provided overrides
+            if design_override:
+                full_cv_dict["design"] = design_override
+            # Otherwise let RenderCV use the theme's default design
+
+            # Add locale config if provided
+            if locale_override:
+                full_cv_dict["locale"] = locale_override
+
+            # Add rendercv settings if provided
+            if rendercv_settings_override:
+                full_cv_dict["rendercv_settings"] = rendercv_settings_override
 
             # Add social_networks only if not empty
             social_networks = json.loads(personal.social_networks)
@@ -556,7 +670,7 @@ def process_resume_task(task_id: str):
                 full_cv_dict["cv"]["social_networks"] = social_networks
 
             # 5. Render PDF in dedicated task folder
-            output_dir = Path("output") / task_id  # NEW: One folder per task
+            output_dir = Path("output") / task_id
             output_dir.mkdir(parents=True, exist_ok=True)
 
             # Store folder path in task
@@ -612,55 +726,93 @@ def on_startup():
     create_db_and_tables()
 
 
-@app.post("/users/create", dependencies=[Depends(verify_api_key)])
+@app.post("/users", dependencies=[Depends(verify_api_key)])
 def create_user(
-    user_id: str = Depends(get_user_id), session: Session = Depends(get_session)
+    request: CreateUserRequest,
+    user_id: str = Depends(get_user_id),
+    session: Session = Depends(get_session),
 ):
-    """Create a new user profile"""
+    """Create a new user profile with personal information"""
     existing = session.exec(
         select(UserProfile).where(UserProfile.user_id == user_id)
     ).first()
 
     if existing:
-        raise HTTPException(status_code=400, detail="User already exists")
+        return APIResponse(
+            success=False, message="User already exists", error="USER_EXISTS"
+        )
 
-    user, personal = get_or_create_user_profile(session, user_id)
+    # Create user profile with provided or default data
+    if request.profile_data:
+        profile_data_json = json.dumps(request.profile_data)
+    else:
+        # Default empty profile
+        default_profile = {
+            "education": [],
+            "experience": [],
+            "skills": {},
+        }
+        profile_data_json = json.dumps(default_profile)
 
-    return {
-        "status": "created",
-        "user_id": user_id,
-        "message": "User profile created with default data",
-    }
+    user = UserProfile(user_id=user_id, profile_data=profile_data_json)
+    session.add(user)
+    session.commit()
+    session.refresh(user)
+
+    # Create personal info with provided data
+    personal = PersonalInfo(
+        user_id=user_id,
+        name=request.name,
+        email=request.email,
+        phone=request.phone,
+        country_code=request.country_code,
+        location=request.location,
+        social_networks=json.dumps(request.social_networks or []),
+    )
+    session.add(personal)
+    session.commit()
+    session.refresh(personal)
+
+    return APIResponse(
+        success=True,
+        message="User profile created successfully",
+        data={
+            "user_id": user_id,
+            "name": personal.name,
+            "email": personal.email,
+            "created_at": user.created_at.isoformat(),
+        },
+    )
 
 
-@app.get(
-    "/users/profile",
-    response_model=UserProfileResponse,
-    dependencies=[Depends(verify_api_key)],
-)
+@app.get("/users/me", dependencies=[Depends(verify_api_key)])
 def get_user_profile(
     user_id: str = Depends(get_user_id), session: Session = Depends(get_session)
 ):
     """Get complete user profile (personal info + work history)"""
     user, personal = get_or_create_user_profile(session, user_id)
 
-    return {
-        "user_id": user.user_id,
-        "profile_data": json.loads(user.profile_data),
-        "personal_info": {
-            "name": personal.name,
-            "email": personal.email,
-            "phone": personal.phone,
-            "country_code": personal.country_code,
-            "location": personal.location,
-            "social_networks": json.loads(personal.social_networks),
+    return APIResponse(
+        success=True,
+        message="User profile retrieved successfully",
+        data={
+            "user_id": user.user_id,
+            "profile_data": json.loads(user.profile_data),
+            "personal_info": {
+                "name": personal.name,
+                "email": personal.email,
+                "phone": personal.phone,
+                "country_code": personal.country_code,
+                "location": personal.location,
+                "social_networks": json.loads(personal.social_networks),
+            },
+            "created_at": user.created_at.isoformat(),
+            "updated_at": user.updated_at.isoformat(),
         },
-        "created_at": user.created_at,
-        "updated_at": user.updated_at,
-    }
+    )
 
 
-@app.put("/users/personal-info", dependencies=[Depends(verify_api_key)])
+@app.put("/users/me/contact", dependencies=[Depends(verify_api_key)])
 def update_personal_info(
     data: PersonalInfoUpdate,
     user_id: str = Depends(get_user_id),
@@ -682,10 +834,14 @@ def update_personal_info(
     session.add(personal)
     session.commit()
 
-    return {"status": "updated", "user_id": user_id}
+    return APIResponse(
+        success=True,
+        message="Contact information updated successfully",
+        data={"user_id": user_id},
+    )
 
 
-@app.put("/users/profile-data", dependencies=[Depends(verify_api_key)])
+@app.put("/users/me/profile", dependencies=[Depends(verify_api_key)])
 def update_profile_data(
     data: ProfileDataUpdate,
     user_id: str = Depends(get_user_id),
@@ -709,14 +865,18 @@ def update_profile_data(
     session.add(user)
     session.commit()
 
-    return {"status": "updated", "user_id": user_id}
+    return APIResponse(
+        success=True,
+        message="Profile data updated successfully",
+        data={"user_id": user_id},
+    )
 
 
 # ============================================================================
-# API Endpoints - Job & Resume Management
+# API Endpoints - Job Management
 # ============================================================================
-@app.get("/users/jobs", dependencies=[Depends(verify_api_key)])
-def get_user_jobs(
+@app.get("/jobs", dependencies=[Depends(verify_api_key)])
+def list_jobs(
     user_id: str = Depends(get_user_id), session: Session = Depends(get_session)
 ):
     """Get all job descriptions submitted by user"""
@@ -726,220 +886,32 @@ def get_user_jobs(
         .order_by(JobDescription.created_at.desc())
     ).all()
 
-    return {
-        "user_id": user_id,
-        "count": len(jobs),
-        "jobs": [
-            {
-                "id": j.id,
-                "title": j.title,
-                "company": j.company,
-                "created_at": j.created_at,
-            }
-            for j in jobs
-        ],
-    }
+    return APIResponse(
+        success=True,
+        message=f"Retrieved {len(jobs)} jobs",
+        data={
+            "user_id": user_id,
+            "count": len(jobs),
+            "jobs": [
+                {
+                    "id": j.id,
+                    "title": j.title,
+                    "company": j.company,
+                    "created_at": j.created_at.isoformat(),
+                }
+                for j in jobs
+            ],
+        },
+    )
 
 
-@app.get("/users/tasks", dependencies=[Depends(verify_api_key)])
-def get_user_tasks(
-    user_id: str = Depends(get_user_id), session: Session = Depends(get_session)
-):
-    """Get all tasks for a specific user"""
-    tasks = session.exec(
-        select(TaskLog)
-        .where(TaskLog.user_id == user_id)
-        .order_by(TaskLog.created_at.desc())
-    ).all()
-
-    return {
-        "user_id": user_id,
-        "count": len(tasks),
-        "tasks": [
-            {
-                "task_id": t.task_id,
-                "status": t.status,
-                "total_tokens": t.total_tokens,
-                "created_at": t.created_at,
-                "pdf_url": f"/download/{t.task_id}/{Path(t.pdf_path).name}"
-                if t.pdf_path
-                else None,
-            }
-            for t in tasks
-        ],
-    }
-
-
-@app.get(
-    "/resume-content/{task_id}",
-    response_model=ResumeContentResponse,
-    dependencies=[Depends(verify_api_key)],
-)
-def get_resume_content(
-    task_id: str,
-    user_id: str = Depends(get_user_id),
-    session: Session = Depends(get_session),
-):
-    """Fetch the AI-generated resume JSON"""
-    resume = session.exec(
-        select(ResumeContent)
-        .where(ResumeContent.task_id == task_id)
-        .where(ResumeContent.user_id == user_id)
-    ).first()
-
-    if not resume:
-        raise HTTPException(status_code=404, detail="Resume content not found")
-
-    return {
-        "task_id": resume.task_id,
-        "job_id": resume.job_id,
-        "content": json.loads(resume.content),
-        "created_at": resume.created_at,
-    }
-
-
-@app.get(
-    "/analysis/{task_id}",
-    response_model=AnalysisContentResponse,
-    dependencies=[Depends(verify_api_key)],
-)
-def get_analysis(
-    task_id: str,
-    user_id: str = Depends(get_user_id),
-    session: Session = Depends(get_session),
-):
-    """Get job analysis for a specific task"""
-    task = session.get(TaskLog, task_id)
-    if not task or task.user_id != user_id:
-        raise HTTPException(status_code=404, detail="Task not found")
-
-    analysis = session.exec(
-        select(JobAnalysis)
-        .where(JobAnalysis.job_id == task.job_id)
-        .where(JobAnalysis.user_id == user_id)
-        .order_by(JobAnalysis.id.desc())
-    ).first()
-
-    if not analysis:
-        raise HTTPException(status_code=404, detail="Analysis not found")
-
-    return {
-        "task_id": task_id,
-        "job_id": task.job_id,
-        "analysis_text": analysis.analysis_text,
-    }
-
-
-# --- Job Submission (One-Shot) ---
-@app.post(
-    "/submit-job-complete",
-    response_model=TaskResponse,
-    dependencies=[Depends(verify_api_key)],
-)
-def submit_job_complete(
+@app.post("/jobs", dependencies=[Depends(verify_api_key)])
+def create_job_with_analysis(
     request: JobRequest,
     user_id: str = Depends(get_user_id),
     session: Session = Depends(get_session),
 ):
-    """Submit job and automatically run analysis + resume generation"""
-    task_id = str(uuid.uuid4())
-    content_hash = hashlib.sha256(
-        request.description.strip().encode("utf-8")
-    ).hexdigest()
-
-    task = TaskLog(
-        task_id=task_id,
-        user_id=user_id,
-        status="pending",
-        logs=[f"[{datetime.now()}] Task created (One-Shot)"],
-    )
-
-    # Check for cached analysis for THIS USER
-    existing_jd = session.exec(
-        select(JobDescription)
-        .where(JobDescription.content_hash == content_hash)
-        .where(JobDescription.user_id == user_id)
-    ).first()
-
-    if existing_jd:
-        task.job_id = existing_jd.id
-        existing_analysis = session.exec(
-            select(JobAnalysis)
-            .where(JobAnalysis.job_id == existing_jd.id)
-            .where(JobAnalysis.user_id == user_id)
-        ).first()
-
-        if existing_analysis:
-            task.status = "analysis_complete"
-            task.logs.append(f"[{datetime.now()}] Cache hit. Skipping analysis.")
-            session.add(task)
-            session.commit()
-            process_resume_task(task_id)
-            return {
-                "task_id": task_id,
-                "status": "resume_pending",
-                "message": "Analysis cached. Resume generation started.",
-            }
-
-        session.add(task)
-        session.commit()
-        process_analysis_task(
-            task_id,
-            user_id,
-            request.title,
-            request.company,
-            request.description,
-            existing_jd.id,
-            auto_resume=True,
-        )
-        return {
-            "task_id": task_id,
-            "status": "analysis_pending",
-            "message": "JD found. Starting Analysis -> Resume.",
-        }
-
-    new_jd = JobDescription(
-        user_id=user_id,
-        title=request.title,
-        company=request.company,
-        description=request.description,
-        content_hash=content_hash,
-    )
-    session.add(new_jd)
-    session.commit()
-    session.refresh(new_jd)
-
-    task.job_id = new_jd.id
-    session.add(task)
-    session.commit()
-
-    process_analysis_task(
-        task_id,
-        user_id,
-        request.title,
-        request.company,
-        request.description,
-        new_jd.id,
-        auto_resume=True,
-    )
-
-    return {
-        "task_id": task_id,
-        "status": "analysis_pending",
-        "message": "Job submitted. Starting Analysis -> Resume.",
-    }
-
-
-# --- Job Submission (Two-Step) ---
-@app.post(
-    "/submit-job", response_model=TaskResponse, dependencies=[Depends(verify_api_key)]
-)
-def submit_job(
-    request: JobRequest,
-    user_id: str = Depends(get_user_id),
-    session: Session = Depends(get_session),
-):
-    """Submit job for analysis only (manual resume generation trigger)"""
+    """Create job and run analysis only (manual resume generation)"""
     task_id = str(uuid.uuid4())
     content_hash = hashlib.sha256(
         request.description.strip().encode("utf-8")
@@ -950,6 +922,7 @@ def submit_job(
         user_id=user_id,
         status="pending",
         logs=[f"[{datetime.now()}] Task created"],
+        ai_model=request.ai_model,
     )
 
     existing_jd = session.exec(
@@ -971,11 +944,14 @@ def submit_job(
             task.logs.append(f"[{datetime.now()}] Used cached analysis")
             session.add(task)
             session.commit()
-            return {
-                "task_id": task_id,
-                "status": "analysis_complete",
-                "message": "Analysis loaded from cache",
-            }
+            return APIResponse(
+                success=True,
+                message="Analysis loaded from cache",
+                data={
+                    "task_id": task_id,
+                    "status": "analysis_complete",
+                },
+            )
 
         session.add(task)
         session.commit()
@@ -987,12 +963,16 @@ def submit_job(
             request.description,
             existing_jd.id,
             auto_resume=False,
+            ai_model=request.ai_model,
         )
-        return {
-            "task_id": task_id,
-            "status": "analysis_pending",
-            "message": "JD found, starting analysis",
-        }
+        return APIResponse(
+            success=True,
+            message="JD found, starting analysis",
+            data={
+                "task_id": task_id,
+                "status": "analysis_pending",
+            },
+        )
 
     new_jd = JobDescription(
         user_id=user_id,
@@ -1017,78 +997,420 @@ def submit_job(
         request.description,
         new_jd.id,
         auto_resume=False,
+        ai_model=request.ai_model,
     )
 
-    return {
-        "task_id": task_id,
-        "status": "analysis_pending",
-        "message": "Job submitted, analysis started",
-    }
+    return APIResponse(
+        success=True,
+        message="Job submitted, analysis started",
+        data={
+            "task_id": task_id,
+            "status": "analysis_pending",
+        },
+    )
 
 
-@app.post(
-    "/generate-resume/{task_id}",
-    response_model=TaskResponse,
-    dependencies=[Depends(verify_api_key)],
-)
-def trigger_resume(
+@app.post("/jobs/complete", dependencies=[Depends(verify_api_key)])
+def create_job_with_resume(
+    request: JobRequest,
+    user_id: str = Depends(get_user_id),
+    session: Session = Depends(get_session),
+):
+    """Create job and automatically run analysis + resume generation"""
+    task_id = str(uuid.uuid4())
+    content_hash = hashlib.sha256(
+        request.description.strip().encode("utf-8")
+    ).hexdigest()
+
+    task = TaskLog(
+        task_id=task_id,
+        user_id=user_id,
+        status="pending",
+        logs=[f"[{datetime.now()}] Task created (One-Shot)"],
+        ai_model=request.ai_model,
+    )
+
+    existing_jd = session.exec(
+        select(JobDescription)
+        .where(JobDescription.content_hash == content_hash)
+        .where(JobDescription.user_id == user_id)
+    ).first()
+
+    if existing_jd:
+        task.job_id = existing_jd.id
+        existing_analysis = session.exec(
+            select(JobAnalysis)
+            .where(JobAnalysis.job_id == existing_jd.id)
+            .where(JobAnalysis.user_id == user_id)
+        ).first()
+
+        if existing_analysis:
+            task.status = "analysis_complete"
+            task.logs.append(f"[{datetime.now()}] Cache hit. Skipping analysis.")
+            session.add(task)
+            session.commit()
+
+            # Start resume generation with optional configs
+            process_resume_task(
+                task_id,
+                design_override=request.design_config,
+                locale_override=request.locale_config,
+                rendercv_settings_override=request.rendercv_settings,
+                ai_model_override=request.ai_model,
+            )
+
+            return APIResponse(
+                success=True,
+                message="Analysis cached. Resume generation started.",
+                data={
+                    "task_id": task_id,
+                    "status": "resume_pending",
+                },
+            )
+
+        session.add(task)
+        session.commit()
+        process_analysis_task(
+            task_id,
+            user_id,
+            request.title,
+            request.company,
+            request.description,
+            existing_jd.id,
+            auto_resume=True,
+            ai_model=request.ai_model,
+        )
+        return APIResponse(
+            success=True,
+            message="JD found. Starting Analysis -> Resume.",
+            data={
+                "task_id": task_id,
+                "status": "analysis_pending",
+            },
+        )
+
+    new_jd = JobDescription(
+        user_id=user_id,
+        title=request.title,
+        company=request.company,
+        description=request.description,
+        content_hash=content_hash,
+    )
+    session.add(new_jd)
+    session.commit()
+    session.refresh(new_jd)
+
+    task.job_id = new_jd.id
+    session.add(task)
+    session.commit()
+
+    process_analysis_task(
+        task_id,
+        user_id,
+        request.title,
+        request.company,
+        request.description,
+        new_jd.id,
+        auto_resume=True,
+        ai_model=request.ai_model,
+    )
+
+    return APIResponse(
+        success=True,
+        message="Job submitted. Starting Analysis -> Resume.",
+        data={
+            "task_id": task_id,
+            "status": "analysis_pending",
+        },
+    )
+
+
+# ============================================================================
+# API Endpoints - Task Management
+# ============================================================================
+@app.get("/tasks", dependencies=[Depends(verify_api_key)])
+def list_tasks(
+    user_id: str = Depends(get_user_id), session: Session = Depends(get_session)
+):
+    """Get all tasks for a specific user"""
+    tasks = session.exec(
+        select(TaskLog)
+        .where(TaskLog.user_id == user_id)
+        .order_by(TaskLog.created_at.desc())
+    ).all()
+
+    return APIResponse(
+        success=True,
+        message=f"Retrieved {len(tasks)} tasks",
+        data={
+            "user_id": user_id,
+            "count": len(tasks),
+            "tasks": [
+                {
+                    "task_id": t.task_id,
+                    "status": t.status,
+                    "total_tokens": t.total_tokens,
+                    "ai_model": t.ai_model,
+                    "created_at": t.created_at.isoformat(),
+                    "pdf_url": f"/tasks/{t.task_id}/download" if t.pdf_path else None,
+                }
+                for t in tasks
+            ],
+        },
+    )
+
+
+@app.get("/tasks/{task_id}", dependencies=[Depends(verify_api_key)])
+def get_task(
     task_id: str,
     user_id: str = Depends(get_user_id),
     session: Session = Depends(get_session),
 ):
-    """Manually trigger resume generation after analysis"""
+    """Get status and details of a specific task"""
     task = session.get(TaskLog, task_id)
     if not task or task.user_id != user_id:
-        raise HTTPException(status_code=404, detail="Task not found")
+        return APIResponse(
+            success=False, message="Task not found", error="TASK_NOT_FOUND"
+        )
+
+    pdf_url = None
+    if task.status == "resume_complete" and task.pdf_path:
+        pdf_url = f"/tasks/{task_id}/download"
+
+    return APIResponse(
+        success=True,
+        message="Task retrieved successfully",
+        data={
+            "task_id": task.task_id,
+            "status": task.status,
+            "logs": task.logs,
+            "total_tokens": task.total_tokens,
+            "pdf_url": pdf_url,
+            "output_folder": task.output_folder,
+            "ai_model": task.ai_model,
+        },
+    )
+
+
+@app.get("/tasks/{task_id}/analysis", dependencies=[Depends(verify_api_key)])
+def get_task_analysis(
+    task_id: str,
+    user_id: str = Depends(get_user_id),
+    session: Session = Depends(get_session),
+):
+    """Get job analysis for a specific task"""
+    task = session.get(TaskLog, task_id)
+    if not task or task.user_id != user_id:
+        return APIResponse(
+            success=False, message="Task not found", error="TASK_NOT_FOUND"
+        )
+
+    analysis = session.exec(
+        select(JobAnalysis)
+        .where(JobAnalysis.job_id == task.job_id)
+        .where(JobAnalysis.user_id == user_id)
+        .order_by(JobAnalysis.id.desc())
+    ).first()
+
+    if not analysis:
+        return APIResponse(
+            success=False, message="Analysis not found", error="ANALYSIS_NOT_FOUND"
+        )
+
+    return APIResponse(
+        success=True,
+        message="Analysis retrieved successfully",
+        data={
+            "task_id": task_id,
+            "job_id": task.job_id,
+            "analysis_text": analysis.analysis_text,
+            "ai_model": analysis.ai_model,
+        },
+    )
+
+
+@app.get("/tasks/{task_id}/resume", dependencies=[Depends(verify_api_key)])
+def get_task_resume(
+    task_id: str,
+    user_id: str = Depends(get_user_id),
+    session: Session = Depends(get_session),
+):
+    """Get the AI-generated resume content (JSON)"""
+    resume = session.exec(
+        select(ResumeContent)
+        .where(ResumeContent.task_id == task_id)
+        .where(ResumeContent.user_id == user_id)
+    ).first()
+
+    if not resume:
+        return APIResponse(
+            success=False, message="Resume content not found", error="RESUME_NOT_FOUND"
+        )
+
+    return APIResponse(
+        success=True,
+        message="Resume content retrieved successfully",
+        data={
+            "task_id": resume.task_id,
+            "job_id": resume.job_id,
+            "content": json.loads(resume.content),
+            "design_config": json.loads(resume.design_config)
+            if resume.design_config
+            else None,
+            "locale_config": json.loads(resume.locale_config)
+            if resume.locale_config
+            else None,
+            "rendercv_settings": json.loads(resume.rendercv_settings)
+            if resume.rendercv_settings
+            else None,
+            "ai_model": resume.ai_model,
+            "improvement_remarks": resume.improvement_remarks,
+            "created_at": resume.created_at.isoformat(),
+        },
+    )
+
+
+@app.post("/tasks/{task_id}/resume", dependencies=[Depends(verify_api_key)])
+def create_task_resume(
+    task_id: str,
+    request: Optional[RegenerateResumeRequest] = None,
+    user_id: str = Depends(get_user_id),
+    session: Session = Depends(get_session),
+):
+    """Manually trigger resume generation after analysis (with optional config overrides)"""
+    task = session.get(TaskLog, task_id)
+    if not task or task.user_id != user_id:
+        return APIResponse(
+            success=False, message="Task not found", error="TASK_NOT_FOUND"
+        )
 
     if "analysis_complete" not in task.status and "resume" not in task.status:
-        raise HTTPException(status_code=400, detail="Analysis not yet complete")
+        return APIResponse(
+            success=False,
+            message="Analysis not yet complete",
+            error="ANALYSIS_INCOMPLETE",
+        )
 
     task.status = "resume_pending"
     session.add(task)
     session.commit()
 
-    process_resume_task(task_id)
+    # Extract optional overrides from request
+    design_override = request.design_config if request else None
+    locale_override = request.locale_config if request else None
+    settings_override = request.rendercv_settings if request else None
+    ai_model_override = request.ai_model if request else None
+    improvement_remarks = request.improvement_remarks if request else None
 
-    return {
-        "task_id": task_id,
-        "status": "resume_pending",
-        "message": "Resume generation started",
-    }
+    process_resume_task(
+        task_id,
+        design_override=design_override,
+        locale_override=locale_override,
+        rendercv_settings_override=settings_override,
+        ai_model_override=ai_model_override,
+        improvement_remarks=improvement_remarks,
+    )
+
+    return APIResponse(
+        success=True,
+        message="Resume generation started",
+        data={
+            "task_id": task_id,
+            "status": "resume_pending",
+        },
+    )
 
 
-@app.get(
-    "/status/{task_id}",
-    response_model=StatusResponse,
-    dependencies=[Depends(verify_api_key)],
-)
-def get_task_status(
+@app.post("/tasks/{task_id}/regenerate", dependencies=[Depends(verify_api_key)])
+def regenerate_task_resume(
     task_id: str,
+    request: RegenerateResumeRequest,
     user_id: str = Depends(get_user_id),
     session: Session = Depends(get_session),
 ):
-    """Get status of a specific task"""
-    task = session.get(TaskLog, task_id)
-    if not task or task.user_id != user_id:
-        raise HTTPException(status_code=404, detail="Task not found")
+    """
+    Regenerate resume from existing task with new configurations and/or improvement remarks.
+    Creates a new task with the same job but different design/AI settings.
+    """
+    original_task = session.get(TaskLog, task_id)
+    if not original_task or original_task.user_id != user_id:
+        return APIResponse(
+            success=False, message="Original task not found", error="TASK_NOT_FOUND"
+        )
 
-    pdf_url = None
-    if task.status == "resume_complete" and task.pdf_path:
-        filename = Path(task.pdf_path).name
-        pdf_url = f"/download/{task_id}/{filename}"  # Updated URL format
+    if not original_task.job_id:
+        return APIResponse(
+            success=False,
+            message="Original task has no associated job",
+            error="NO_JOB_FOUND",
+        )
 
-    return {
-        "task_id": task.task_id,
-        "status": task.status,
-        "logs": task.logs,
-        "total_tokens": task.total_tokens,
-        "pdf_url": pdf_url,
-        "output_folder": task.output_folder,
-    }
+    # Create new task
+    new_task_id = str(uuid.uuid4())
+    new_task = TaskLog(
+        task_id=new_task_id,
+        user_id=user_id,
+        job_id=original_task.job_id,
+        status="resume_pending",
+        logs=[f"[{datetime.now()}] Task created (Regeneration from {task_id})"],
+        ai_model=request.ai_model or original_task.ai_model,
+    )
+    session.add(new_task)
+    session.commit()
+
+    # Start resume generation with new configs and improvement remarks
+    process_resume_task(
+        new_task_id,
+        design_override=request.design_config,
+        locale_override=request.locale_config,
+        rendercv_settings_override=request.rendercv_settings,
+        ai_model_override=request.ai_model,
+        improvement_remarks=request.improvement_remarks,
+    )
+
+    return APIResponse(
+        success=True,
+        message="Resume regeneration started with new configuration",
+        data={
+            "task_id": new_task_id,
+            "original_task_id": task_id,
+            "status": "resume_pending",
+            "has_improvement_remarks": bool(request.improvement_remarks),
+        },
+    )
 
 
-@app.get("/stats", response_model=StatsResponse, dependencies=[Depends(verify_api_key)])
-def get_stats(
+@app.get("/tasks/{task_id}/download")
+def download_task_pdf(
+    task_id: str, x_api_key: str = Header(...), x_user_id: str = Header(...)
+):
+    """Download PDF file for a specific task"""
+    if x_api_key != API_TOKEN:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+    with Session(engine) as session:
+        task = session.get(TaskLog, task_id)
+        if not task or task.user_id != x_user_id:
+            raise HTTPException(status_code=404, detail="Task not found")
+
+        if not task.pdf_path:
+            raise HTTPException(status_code=404, detail="PDF not yet generated")
+
+        file_path = Path(task.pdf_path)
+
+        if not file_path.exists():
+            raise HTTPException(status_code=404, detail="File not found")
+
+        return FileResponse(
+            path=file_path, filename=file_path.name, media_type="application/pdf"
+        )
+
+
+# ============================================================================
+# API Endpoints - Statistics
+# ============================================================================
+@app.get("/users/me/stats", dependencies=[Depends(verify_api_key)])
+def get_user_stats(
     user_id: str = Depends(get_user_id), session: Session = Depends(get_session)
 ):
     """Get user-specific statistics"""
@@ -1113,37 +1435,18 @@ def get_stats(
             "id": t.task_id,
             "status": t.status,
             "tokens": t.total_tokens,
-            "time": t.created_at,
+            "ai_model": t.ai_model,
+            "time": t.created_at.isoformat(),
         }
         for t in tasks
     ]
 
-    return {
-        "total_tasks": len(recent_list),
-        "total_tokens_used": all_time_tokens,
-        "recent_tasks": recent_list,
-    }
-
-
-@app.get("/download/{task_id}/{filename}")
-def download_file(
-    task_id: str,
-    filename: str,
-    x_api_key: str = Header(...),
-    x_user_id: str = Header(...),
-):
-    """Download PDF file from task-specific folder"""
-    if x_api_key != API_TOKEN:
-        raise HTTPException(status_code=401, detail="Unauthorized")
-
-    # Verify task belongs to user
-    with Session(engine) as session:
-        task = session.get(TaskLog, task_id)
-        if not task or task.user_id != x_user_id:
-            raise HTTPException(status_code=404, detail="Task not found")
-
-    file_path = Path("output") / task_id / filename
-    if not file_path.exists():
-        raise HTTPException(status_code=404, detail="File not found")
-
-    return FileResponse(path=file_path, filename=filename, media_type="application/pdf")
+    return APIResponse(
+        success=True,
+        message="Statistics retrieved successfully",
+        data={
+            "total_tasks": len(recent_list),
+            "total_tokens_used": all_time_tokens,
+            "recent_tasks": recent_list,
+        },
+    )
