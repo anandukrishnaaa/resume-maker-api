@@ -125,6 +125,45 @@ def sample_user_data():
 
 
 @pytest.fixture
+def sample_resume_text():
+    """Sample resume text for parsing"""
+    return """John Doe
+john.doe@example.com | +91-9876543210 | Mumbai, India | linkedin.com/in/johndoe
+
+PROFESSIONAL SUMMARY
+Experienced software engineer with 5+ years building scalable web applications.
+
+EXPERIENCE
+
+Senior Software Engineer | TechCorp Inc. | Mumbai, India | June 2022 - Present
+• Led development of microservices architecture serving 1M+ users
+• Reduced API response time by 40% through optimization
+• Mentored team of 5 junior engineers
+• Technologies: Python, FastAPI, Docker, AWS
+
+Software Engineer | StartupXYZ | Bangalore, India | Jan 2020 - May 2022
+• Built RESTful APIs using Python and FastAPI
+• Implemented CI/CD pipelines with GitHub Actions
+• Collaborated with frontend team on React applications
+• Increased system reliability to 99.9% uptime
+
+EDUCATION
+
+Bachelor of Technology in Computer Science | IIT Bombay | Mumbai, India | 2016 - 2020
+• GPA: 3.8/4.0
+• Dean's List all semesters
+• President of Computer Science Club
+
+SKILLS
+
+Programming Languages: Python, JavaScript, Go, TypeScript, SQL
+Frameworks & Libraries: FastAPI, Django, React, Node.js, Express
+Tools & Technologies: Docker, Kubernetes, AWS, PostgreSQL, MongoDB, Redis
+Soft Skills: Leadership, Team Collaboration, Problem Solving
+"""
+
+
+@pytest.fixture
 def sample_job_request():
     """Sample job description"""
     return {
@@ -266,6 +305,83 @@ class TestUserManagement:
         profile = profile_response.json()
         assert len(profile["data"]["profile_data"]["experience"]) == 1
         assert profile["data"]["profile_data"]["experience"][0]["company"] == "NewCorp"
+
+
+# ============================================================================
+# Test: Resume Parsing (NEW)
+# ============================================================================
+class TestResumeParsing:
+    """Test AI-powered resume parsing functionality"""
+
+    def test_create_user_from_resume(
+        self, client: TestClient, auth_headers: dict, sample_resume_text: str
+    ):
+        """Test creating user from resume text"""
+        response = client.post(
+            "/users/from-resume",
+            headers=auth_headers,
+            json={"resume_text": sample_resume_text, "overwrite_existing": False},
+        )
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["success"] is True
+        assert "extracted_data" in data["data"]
+        assert data["data"]["name"] == "John Doe"
+        assert data["data"]["email"] == "john.doe@example.com"
+        assert data["data"]["education_count"] >= 1
+        assert data["data"]["experience_count"] >= 1
+        assert "tokens_used" in data["data"]
+
+    def test_create_user_from_resume_duplicate_without_overwrite(
+        self,
+        client: TestClient,
+        auth_headers: dict,
+        sample_resume_text: str,
+        sample_user_data: dict,
+    ):
+        """Test creating user from resume when user already exists (without overwrite)"""
+        # Create user first
+        client.post("/users", headers=auth_headers, json=sample_user_data)
+
+        # Try to create from resume without overwrite
+        response = client.post(
+            "/users/from-resume",
+            headers=auth_headers,
+            json={"resume_text": sample_resume_text, "overwrite_existing": False},
+        )
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["success"] is False
+        assert data["error"] == "USER_EXISTS"
+
+    def test_overwrite_user_from_resume(
+        self,
+        client: TestClient,
+        auth_headers: dict,
+        sample_resume_text: str,
+        sample_user_data: dict,
+    ):
+        """Test overwriting existing user profile with parsed resume"""
+        # Create user first
+        client.post("/users", headers=auth_headers, json=sample_user_data)
+
+        # Overwrite with resume data
+        response = client.post(
+            "/users/from-resume",
+            headers=auth_headers,
+            json={"resume_text": sample_resume_text, "overwrite_existing": True},
+        )
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["success"] is True
+
+        # Verify the profile was updated
+        profile_response = client.get("/users/me", headers=auth_headers)
+        profile = profile_response.json()
+        assert profile["data"]["personal_info"]["name"] == "John Doe"
 
 
 # ============================================================================
@@ -503,6 +619,44 @@ class TestTaskManagement:
         assert data["data"]["original_task_id"] == task_id
         assert data["data"]["has_improvement_remarks"] is True
 
+    def test_regenerate_resume_design_only(
+        self,
+        client: TestClient,
+        auth_headers: dict,
+        sample_user_data: dict,
+        sample_job_request: dict,
+    ):
+        """Test regenerating resume with design changes only (should reuse AI content)"""
+        # Create user and submit job
+        client.post("/users", headers=auth_headers, json=sample_user_data)
+        submit_response = client.post(
+            "/jobs/complete", headers=auth_headers, json=sample_job_request
+        )
+        task_id = submit_response.json()["data"]["task_id"]
+
+        # Regenerate with ONLY design change (no improvement remarks)
+        regenerate_request = {
+            "design_config": {
+                "theme": "moderncv",
+                "colors": {"section_titles": "rgb(100, 0, 0)"},
+            }
+        }
+
+        response = client.post(
+            f"/tasks/{task_id}/regenerate",
+            headers=auth_headers,
+            json=regenerate_request,
+        )
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["success"] is True
+        assert data["data"]["has_improvement_remarks"] is False
+
+        # This should have created a new task that reuses AI content
+        new_task_id = data["data"]["task_id"]
+        assert new_task_id != task_id
+
 
 # ============================================================================
 # Test: Resume Content
@@ -637,6 +791,20 @@ class TestErrorHandling:
         assert data["success"] is False
         assert data["error"] == "TASK_NOT_FOUND"
 
+    def test_parse_empty_resume(self, client: TestClient, auth_headers: dict):
+        """Test parsing empty or invalid resume text"""
+        response = client.post(
+            "/users/from-resume",
+            headers=auth_headers,
+            json={"resume_text": "   ", "overwrite_existing": False},
+        )
+
+        # Should handle gracefully (either error or minimal extraction)
+        assert response.status_code == 200
+        data = response.json()
+        # Depending on AI behavior, might succeed with minimal data or fail
+        assert "success" in data
+
 
 # ============================================================================
 # Test: Integration Scenarios
@@ -681,6 +849,33 @@ class TestIntegrationScenarios:
         stats_response = client.get("/users/me/stats", headers=auth_headers)
         assert stats_response.json()["data"]["total_tasks"] >= 1
 
+    def test_resume_parsing_workflow(
+        self,
+        client: TestClient,
+        auth_headers: dict,
+        sample_resume_text: str,
+        sample_job_request: dict,
+    ):
+        """Test complete workflow starting with resume parsing"""
+        # Step 1: Create user from resume
+        parse_response = client.post(
+            "/users/from-resume",
+            headers=auth_headers,
+            json={"resume_text": sample_resume_text, "overwrite_existing": False},
+        )
+        assert parse_response.json()["success"] is True
+
+        # Step 2: Verify profile was created
+        profile_response = client.get("/users/me", headers=auth_headers)
+        assert profile_response.json()["success"] is True
+        assert profile_response.json()["data"]["personal_info"]["name"] == "John Doe"
+
+        # Step 3: Submit job to generate tailored resume
+        job_response = client.post(
+            "/jobs/complete", headers=auth_headers, json=sample_job_request
+        )
+        assert job_response.json()["success"] is True
+
     def test_multiple_job_submissions(
         self, client: TestClient, auth_headers: dict, sample_user_data: dict
     ):
@@ -724,6 +919,46 @@ class TestIntegrationScenarios:
         assert jobs_response.json()["data"]["count"] == 3, (
             f"Expected 3 jobs, got {jobs_response.json()['data']['count']}"
         )
+
+    def test_iterative_resume_improvement(
+        self,
+        client: TestClient,
+        auth_headers: dict,
+        sample_user_data: dict,
+        sample_job_request: dict,
+    ):
+        """Test iterating on a resume with multiple improvement cycles"""
+        # Create user and generate initial resume
+        client.post("/users", headers=auth_headers, json=sample_user_data)
+        initial_response = client.post(
+            "/jobs/complete", headers=auth_headers, json=sample_job_request
+        )
+        task_id_1 = initial_response.json()["data"]["task_id"]
+
+        # First improvement: Make it more concise
+        improve_1 = client.post(
+            f"/tasks/{task_id_1}/regenerate",
+            headers=auth_headers,
+            json={"improvement_remarks": "Make the summary more concise"},
+        )
+        assert improve_1.json()["success"] is True
+        task_id_2 = improve_1.json()["data"]["task_id"]
+
+        # Second improvement: Add metrics + change design
+        improve_2 = client.post(
+            f"/tasks/{task_id_2}/regenerate",
+            headers=auth_headers,
+            json={
+                "improvement_remarks": "Add more quantifiable metrics",
+                "design_config": {"theme": "sb2nov"},
+            },
+        )
+        assert improve_2.json()["success"] is True
+        task_id_3 = improve_2.json()["data"]["task_id"]
+
+        # Verify all three tasks exist
+        tasks_response = client.get("/tasks", headers=auth_headers)
+        assert tasks_response.json()["data"]["count"] >= 3
 
 
 # ============================================================================

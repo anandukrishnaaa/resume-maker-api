@@ -16,3 +16,4 @@ wheels/
 *.typ
 .DS_Store
 *.env
+tmp/

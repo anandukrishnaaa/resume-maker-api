@@ -161,6 +161,73 @@ class ProfileDataInput(BaseModel):
 
 
 # ============================================================================
+# Resume Parsing Models (AI Output)
+# ============================================================================
+class ExtractedContactInfo(BaseModel):
+    """Contact information extracted from resume"""
+
+    name: str = Field(..., description="Full name")
+    email: str = Field(..., description="Email address")
+    phone: str = Field(..., description="Phone number without country code")
+    country_code: str = Field(default="+1", description="Country code")
+    location: str = Field(
+        ..., description="Full location (City, State/Province, Country)"
+    )
+    social_networks: Optional[List[Dict[str, str]]] = Field(
+        default=None,
+        description="List of social networks like [{'network': 'LinkedIn', 'username': 'johndoe'}]",
+    )
+
+
+class ExtractedEducation(BaseModel):
+    """Education entry extracted from resume"""
+
+    institution: str
+    area: str = Field(..., description="Field of study")
+    degree: str
+    start_date: str = Field(..., description="Start date in YYYY-MM format")
+    end_date: str = Field(..., description="End date in YYYY-MM format or 'present'")
+    highlights: Optional[List[str]] = Field(default=None)
+    location: Optional[str] = None
+
+
+class ExtractedExperience(BaseModel):
+    """Work experience extracted from resume"""
+
+    company: str
+    position: str
+    start_date: str = Field(..., description="Start date in YYYY-MM format")
+    end_date: str = Field(..., description="End date in YYYY-MM format or 'present'")
+    location: Optional[str] = None
+    highlights: List[str] = Field(
+        default_factory=list, description="List of achievements and responsibilities"
+    )
+
+
+class ExtractedSkills(BaseModel):
+    """Skills extracted from resume, organized by category"""
+
+    languages: Optional[List[str]] = None
+    frameworks: Optional[List[str]] = None
+    tools: Optional[List[str]] = None
+    databases: Optional[List[str]] = None
+    soft_skills: Optional[List[str]] = None
+    certifications: Optional[List[str]] = None
+
+    class Config:
+        extra = "allow"  # Allow custom skill categories
+
+
+class ExtractedProfile(BaseModel):
+    """Complete profile extracted from resume"""
+
+    contact_info: ExtractedContactInfo
+    education: List[ExtractedEducation]
+    experience: List[ExtractedExperience]
+    skills: ExtractedSkills
+
+
+# ============================================================================
 # Pydantic Output Models (For Structured AI Response)
 # ============================================================================
 class EducationEntry(BaseModel):
@@ -425,6 +492,53 @@ class CreateUserRequest(BaseModel):
         }
 
 
+class ResumeParseRequest(BaseModel):
+    """Request to parse resume text"""
+
+    resume_text: str = Field(
+        ...,
+        example="""John Doe
+john.doe@example.com | +91-9876543210 | Mumbai, India | linkedin.com/in/johndoe
+
+PROFESSIONAL SUMMARY
+Experienced software engineer with 5+ years building scalable web applications.
+
+EXPERIENCE
+
+Senior Software Engineer | TechCorp Inc. | Mumbai, India | June 2022 - Present
+• Led development of microservices architecture serving 1M+ users
+• Reduced API response time by 40% through optimization
+• Mentored team of 5 junior engineers
+• Technologies: Python, FastAPI, Docker, AWS
+
+Software Engineer | StartupXYZ | Bangalore, India | Jan 2020 - May 2022
+• Built RESTful APIs using Python and FastAPI
+• Implemented CI/CD pipelines with GitHub Actions
+• Collaborated with frontend team on React applications
+• Increased system reliability to 99.9% uptime
+
+EDUCATION
+
+Bachelor of Technology in Computer Science | IIT Bombay | Mumbai, India | 2016 - 2020
+• GPA: 3.8/4.0
+• Dean's List all semesters
+• President of Computer Science Club
+
+SKILLS
+
+Programming Languages: Python, JavaScript, Go, TypeScript, SQL
+Frameworks & Libraries: FastAPI, Django, React, Node.js, Express
+Tools & Technologies: Docker, Kubernetes, AWS, PostgreSQL, MongoDB, Redis
+Soft Skills: Leadership, Team Collaboration, Problem Solving
+""",
+        description="Complete resume text to parse",
+    )
+    overwrite_existing: bool = Field(
+        default=False,
+        description="If true, overwrites existing profile. If false, returns error if profile exists.",
+    )
+
+
 class JobRequest(BaseModel):
     title: str = Field(..., example="Senior Backend Engineer")
     company: str = Field(..., example="BigTech Corp")
@@ -540,6 +654,36 @@ def create_resume_generator_agent(model_id: Optional[str] = None) -> Agent:
             "- Keep summary to 2-4 concise bullet points",
         ],
         output_schema=ResumeSections,
+        db=db,
+        markdown=False,
+    )
+
+
+def create_resume_parser_agent(model_id: Optional[str] = None) -> Agent:
+    """Create an AI agent that parses resume text into structured data"""
+    db = SqliteDb(db_file="tmp/agents.db", session_table="resume_parser_sessions")
+    return Agent(
+        name="Resume Parser",
+        model=get_openrouter_model(model_id),
+        instructions=[
+            "You are an expert resume parser that extracts structured information from resumes.",
+            "Extract contact information, education, work experience, and skills.",
+            "",
+            "IMPORTANT FORMATTING RULES:",
+            "1. For dates: Use YYYY-MM format. If only year is given, use YYYY-01 for start and YYYY-12 for end.",
+            "2. If currently employed, use 'present' as end_date",
+            "3. Extract phone numbers without special characters (only digits)",
+            "4. For country code: Extract if present (e.g., +91, +1), otherwise use +1 as default",
+            "5. For location: Include city, state/province, and country if available",
+            "6. For social networks: Extract LinkedIn, GitHub, Twitter, etc. Format as {'network': 'LinkedIn', 'username': 'johndoe'}",
+            "7. For skills: Categorize into languages, frameworks, tools, databases, soft_skills, certifications",
+            "8. For highlights: Extract bullet points as a list of achievements/responsibilities",
+            "9. Be thorough - extract ALL information from the resume",
+            "10. If information is missing or unclear, make reasonable inferences based on context",
+            "",
+            "Output the extracted information in the specified JSON structure.",
+        ],
+        output_schema=ExtractedProfile,
         db=db,
         markdown=False,
     )
@@ -959,6 +1103,149 @@ def create_user(
             "created_at": user.created_at.isoformat(),
         },
     )
+
+
+@app.post(
+    "/users/from-resume",
+    dependencies=[Depends(verify_api_key)],
+    response_model=APIResponse,
+)
+def create_user_from_resume(
+    request: ResumeParseRequest,
+    user_id: str = Depends(get_user_id),
+    session: Session = Depends(get_session),
+):
+    """
+    Parse resume text using AI and automatically create user profile.
+
+    This endpoint uses AI to extract:
+    - Contact information (name, email, phone, location, social networks)
+    - Education history
+    - Work experience
+    - Skills (categorized)
+
+    The extracted data is then used to create a complete user profile.
+    """
+    try:
+        # Check if user already exists
+        existing_user = session.exec(
+            select(UserProfile).where(UserProfile.user_id == user_id)
+        ).first()
+
+        if existing_user and not request.overwrite_existing:
+            return APIResponse(
+                success=False,
+                message="User already exists. Set overwrite_existing=true to update.",
+                error="USER_EXISTS",
+            )
+
+        # Parse resume with AI
+        logger.info(f"Parsing resume for user: {user_id}")
+        parser = create_resume_parser_agent()
+
+        response = parser.run(
+            f"Parse the following resume and extract all information:\n\n{request.resume_text}"
+        )
+
+        extracted: ExtractedProfile = response.content
+
+        # Track tokens used
+        tokens_used = 0
+        if response.metrics:
+            try:
+                tokens_used = response.metrics.to_dict().get("total_tokens", 0)
+            except:
+                tokens_used = getattr(response.metrics, "total_tokens", 0)
+
+        logger.info(f"Resume parsed successfully. Tokens used: {tokens_used}")
+
+        # Convert extracted data to storage format
+        profile_data = {
+            "education": [
+                edu.model_dump(exclude_none=True) for edu in extracted.education
+            ],
+            "experience": [
+                exp.model_dump(exclude_none=True) for exp in extracted.experience
+            ],
+            "skills": extracted.skills.model_dump(exclude_none=True),
+        }
+
+        # Create or update user profile
+        if existing_user:
+            # Update existing
+            existing_user.profile_data = json.dumps(profile_data)
+            existing_user.updated_at = datetime.now()
+            session.add(existing_user)
+            logger.info(f"Updated existing user profile: {user_id}")
+        else:
+            # Create new
+            user = UserProfile(user_id=user_id, profile_data=json.dumps(profile_data))
+            session.add(user)
+            logger.info(f"Created new user profile: {user_id}")
+
+        session.commit()
+
+        # Create or update personal info
+        existing_personal = session.exec(
+            select(PersonalInfo).where(PersonalInfo.user_id == user_id)
+        ).first()
+
+        contact = extracted.contact_info
+        social_networks_json = json.dumps(contact.social_networks or [])
+
+        if existing_personal:
+            # Update existing
+            existing_personal.name = contact.name
+            existing_personal.email = contact.email
+            existing_personal.phone = contact.phone
+            existing_personal.country_code = contact.country_code
+            existing_personal.location = contact.location
+            existing_personal.social_networks = social_networks_json
+            existing_personal.updated_at = datetime.now()
+            session.add(existing_personal)
+            logger.info(f"Updated personal info for: {user_id}")
+        else:
+            # Create new
+            personal = PersonalInfo(
+                user_id=user_id,
+                name=contact.name,
+                email=contact.email,
+                phone=contact.phone,
+                country_code=contact.country_code,
+                location=contact.location,
+                social_networks=social_networks_json,
+            )
+            session.add(personal)
+            logger.info(f"Created personal info for: {user_id}")
+
+        session.commit()
+
+        return APIResponse(
+            success=True,
+            message="User profile created successfully from resume",
+            data={
+                "user_id": user_id,
+                "name": contact.name,
+                "email": contact.email,
+                "education_count": len(extracted.education),
+                "experience_count": len(extracted.experience),
+                "tokens_used": tokens_used,
+                "extracted_data": {
+                    "contact_info": contact.model_dump(),
+                    "education": [edu.model_dump() for edu in extracted.education],
+                    "experience": [exp.model_dump() for exp in extracted.experience],
+                    "skills": extracted.skills.model_dump(exclude_none=True),
+                },
+            },
+        )
+
+    except Exception as e:
+        logger.error(f"Error parsing resume: {e}", exc_info=True)
+        return APIResponse(
+            success=False,
+            message=f"Failed to parse resume: {str(e)}",
+            error="PARSING_ERROR",
+        )
 
 
 @app.get(
