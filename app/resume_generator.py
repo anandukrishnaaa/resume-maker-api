@@ -2,18 +2,15 @@
 AI-Powered Resume Generator API with Multi-User Support and REST-Compliant Endpoints
 """
 
-import os
 import json
 import hashlib
-import uuid
-import yaml
-import logging
 from datetime import datetime
 from typing import Optional, Dict, Any, List
 from pathlib import Path
 
 from fastapi import FastAPI, Depends, HTTPException, status, Header
 from fastapi.responses import FileResponse
+from fastapi.security import APIKeyHeader
 from pydantic import BaseModel, Field
 from sqlmodel import (
     SQLModel,
@@ -34,6 +31,7 @@ import rendercv.renderer as renderer
 
 from environs import Env
 from huey import SqliteHuey
+import logging
 
 # ============================================================================
 # Logging Setup
@@ -50,10 +48,99 @@ logger = logging.getLogger(__name__)
 # ============================================================================
 env = Env()
 env.read_env()
-api_key = env.str("OPENROUTER_API_KEY", "your-key-here")
-API_TOKEN = "secret-token-123"
 
-app = FastAPI(title="Resume Generator AI", version="1.0.0")
+OPENROUTER_API_KEY = env.str("OPENROUTER_API_KEY", "your-key-here")
+API_TOKEN = env.str("API_TOKEN", "secret-token-123")
+
+# ============================================================================
+# FastAPI App Setup
+# ============================================================================
+app = FastAPI(
+    title="Resume Generator AI",
+    version="1.0.0",
+    description="AI-powered resume generation and analysis API with multi-user support",
+)
+
+# ============================================================================
+# Security Schemes
+# ============================================================================
+api_key_header = APIKeyHeader(
+    name="X-Api-Key", description="API Key for authentication"
+)
+
+
+async def verify_api_key(api_key: str = Depends(api_key_header)) -> str:
+    """Verify API key from X-Api-Key header"""
+    if api_key != API_TOKEN:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid or missing API Key",
+            headers={"WWW-Authenticate": "ApiKey"},
+        )
+    return api_key
+
+
+async def get_user_id(
+    x_user_id: str = Header(
+        ...,
+        description="Your unique User ID. Obtain from POST /users or POST /users/from-resume",
+        example="user_1",
+    ),
+) -> str:
+    """Extract and validate user ID from X-User-Id header"""
+    if not x_user_id or not x_user_id.strip():
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="X-User-Id header is required and cannot be empty",
+        )
+    return x_user_id.strip()
+
+
+async def get_optional_user_id(
+    x_user_id: Optional[str] = Header(
+        None,
+        description="Optional User ID. If not provided, a new one will be generated",
+        example="user_1",
+    ),
+) -> Optional[str]:
+    """Extract user ID from header if provided (optional)"""
+    if x_user_id and x_user_id.strip():
+        return x_user_id.strip()
+    return None
+
+
+# ============================================================================
+# Helper Functions for ID Generation
+# ============================================================================
+def generate_user_id(db_id: int) -> str:
+    """Convert database ID to user-facing ID format"""
+    return f"user_{db_id}"
+
+
+def parse_user_id(user_id: str) -> int:
+    """Extract database ID from user_id string"""
+    if not user_id.startswith("user_"):
+        raise ValueError("Invalid user_id format. Expected format: user_123")
+    try:
+        return int(user_id.replace("user_", ""))
+    except ValueError:
+        raise ValueError("Invalid user_id format. Expected format: user_123")
+
+
+def generate_task_id(db_id: int) -> str:
+    """Convert database ID to task-facing ID format"""
+    return f"task_{db_id}"
+
+
+def parse_task_id(task_id: str) -> int:
+    """Extract database ID from task_id string"""
+    if not task_id.startswith("task_"):
+        raise ValueError("Invalid task_id format. Expected format: task_123")
+    try:
+        return int(task_id.replace("task_", ""))
+    except ValueError:
+        raise ValueError("Invalid task_id format. Expected format: task_123")
+
 
 # ============================================================================
 # Huey Configuration (Task Queue)
@@ -125,38 +212,9 @@ class SkillsInput(BaseModel):
 class ProfileDataInput(BaseModel):
     """Complete profile data structure"""
 
-    education: Optional[List[EducationInput]] = Field(
-        default=None,
-        example=[
-            {
-                "institution": "Indian Institute of Technology",
-                "area": "Computer Science",
-                "degree": "B.Tech",
-                "start_date": "2018-08",
-                "end_date": "2022-05",
-                "highlights": ["GPA: 3.8/4.0"],
-            }
-        ],
-    )
-    experience: Optional[List[ExperienceInput]] = Field(
-        default=None,
-        example=[
-            {
-                "company": "TechCorp",
-                "position": "Software Engineer",
-                "start_date": "2022-06",
-                "end_date": "present",
-                "highlights": ["Built scalable APIs"],
-            }
-        ],
-    )
-    skills: Optional[SkillsInput] = Field(
-        default=None,
-        example={
-            "languages": ["Python", "JavaScript"],
-            "frameworks": ["FastAPI", "React"],
-        },
-    )
+    education: Optional[List[EducationInput]] = Field(default=None)
+    experience: Optional[List[ExperienceInput]] = Field(default=None)
+    skills: Optional[SkillsInput] = Field(default=None)
 
 
 # ============================================================================
@@ -371,7 +429,7 @@ class UserProfile(SQLModel, table=True):
     """Stores user-specific profile information"""
 
     id: Optional[int] = SQLField(default=None, primary_key=True)
-    user_id: str = SQLField(index=True, unique=True)
+    user_id: str = SQLField(index=True, unique=True)  # user_1, user_2, etc.
     profile_data: str
     created_at: datetime = SQLField(default_factory=datetime.now)
     updated_at: datetime = SQLField(default_factory=datetime.now)
@@ -381,7 +439,9 @@ class PersonalInfo(SQLModel, table=True):
     """Stores personal contact information per user"""
 
     id: Optional[int] = SQLField(default=None, primary_key=True)
-    user_id: str = SQLField(foreign_key="userprofile.user_id", index=True, unique=True)
+    user_profile_id: int = SQLField(
+        foreign_key="userprofile.id", index=True, unique=True
+    )
     name: str
     email: str
     phone: str
@@ -393,7 +453,7 @@ class PersonalInfo(SQLModel, table=True):
 
 class JobDescription(SQLModel, table=True):
     id: Optional[int] = SQLField(default=None, primary_key=True)
-    user_id: str = SQLField(foreign_key="userprofile.user_id", index=True)
+    user_profile_id: int = SQLField(foreign_key="userprofile.id", index=True)
     title: str
     company: str
     description: str
@@ -403,19 +463,37 @@ class JobDescription(SQLModel, table=True):
 
 class JobAnalysis(SQLModel, table=True):
     id: Optional[int] = SQLField(default=None, primary_key=True)
-    user_id: str = SQLField(foreign_key="userprofile.user_id", index=True)
+    user_profile_id: int = SQLField(foreign_key="userprofile.id", index=True)
     job_id: int = SQLField(foreign_key="jobdescription.id")
     analysis_text: str
     ai_model: Optional[str] = None
     created_at: datetime = SQLField(default_factory=datetime.now)
 
 
+class TaskLog(SQLModel, table=True):
+    """Tracks the lifecycle of a request"""
+
+    id: Optional[int] = SQLField(default=None, primary_key=True)
+    task_id: str = SQLField(index=True, unique=True)  # task_1, task_2, etc.
+    user_profile_id: int = SQLField(foreign_key="userprofile.id", index=True)
+    job_id: Optional[int] = SQLField(default=None, foreign_key="jobdescription.id")
+    task_type: str = SQLField(default="job_tailored")
+    status: str = SQLField(default="pending")
+    total_tokens: int = SQLField(default=0)
+    logs: List[str] = SQLField(default=[], sa_column=Column(JSON))
+    output_folder: Optional[str] = None
+    pdf_path: Optional[str] = None
+    ai_model: Optional[str] = None
+    created_at: datetime = SQLField(default_factory=datetime.now)
+    updated_at: datetime = SQLField(default_factory=datetime.now)
+
+
 class ResumeContent(SQLModel, table=True):
     """Stores the AI-generated resume JSON"""
 
     id: Optional[int] = SQLField(default=None, primary_key=True)
-    user_id: str = SQLField(foreign_key="userprofile.user_id", index=True)
-    task_id: str = SQLField(foreign_key="tasklog.task_id", index=True)
+    user_profile_id: int = SQLField(foreign_key="userprofile.id", index=True)
+    task_id: str = SQLField(index=True)
     job_id: Optional[int] = SQLField(default=None, foreign_key="jobdescription.id")
     content: str
     design_config: Optional[str] = None
@@ -430,7 +508,7 @@ class ProfileAnalysisRecord(SQLModel, table=True):
     """Stores profile analysis results"""
 
     id: Optional[int] = SQLField(default=None, primary_key=True)
-    user_id: str = SQLField(foreign_key="userprofile.user_id", index=True)
+    user_profile_id: int = SQLField(foreign_key="userprofile.id", index=True)
     analysis_data: str
     ai_model: Optional[str] = None
     created_at: datetime = SQLField(default_factory=datetime.now)
@@ -440,32 +518,15 @@ class ResumeAnalysisRecord(SQLModel, table=True):
     """Stores resume analysis results"""
 
     id: Optional[int] = SQLField(default=None, primary_key=True)
-    user_id: str = SQLField(foreign_key="userprofile.user_id", index=True)
-    task_id: str = SQLField(foreign_key="tasklog.task_id")
+    user_profile_id: int = SQLField(foreign_key="userprofile.id", index=True)
+    task_id: str
     analysis_data: str
     ai_model: Optional[str] = None
     created_at: datetime = SQLField(default_factory=datetime.now)
 
 
-class TaskLog(SQLModel, table=True):
-    """Tracks the lifecycle of a request via UUID"""
-
-    task_id: str = SQLField(primary_key=True, index=True)
-    user_id: str = SQLField(foreign_key="userprofile.user_id", index=True)
-    job_id: Optional[int] = SQLField(default=None, foreign_key="jobdescription.id")
-    task_type: str = SQLField(default="job_tailored")
-    status: str = SQLField(default="pending")
-    total_tokens: int = SQLField(default=0)
-    logs: List[str] = SQLField(default=[], sa_column=Column(JSON))
-    output_folder: Optional[str] = None
-    pdf_path: Optional[str] = None
-    ai_model: Optional[str] = None
-    created_at: datetime = SQLField(default_factory=datetime.now)
-    updated_at: datetime = SQLField(default_factory=datetime.now)
-
-
 # ============================================================================
-# Database & Security
+# Database & Session Management
 # ============================================================================
 DATABASE_URL = "sqlite:///./resume_generator.db"
 engine = create_engine(
@@ -482,16 +543,98 @@ def get_session():
         yield session
 
 
-async def verify_api_key(x_api_key: str = Header(...)):
-    if x_api_key != API_TOKEN:
-        raise HTTPException(status_code=401, detail="Invalid API Key")
+# ============================================================================
+# Helper Functions
+# ============================================================================
+def get_user_by_id(session: Session, user_id: str) -> Optional[UserProfile]:
+    """Get user profile by user_id string (e.g., 'user_1')"""
+    try:
+        db_id = parse_user_id(user_id)
+        user = session.exec(select(UserProfile).where(UserProfile.id == db_id)).first()
+        return user
+    except ValueError:
+        return None
 
 
-async def get_user_id(x_user_id: str = Header(...)) -> str:
-    """Extract user_id from request header"""
-    if not x_user_id:
-        raise HTTPException(status_code=400, detail="X-User-Id header required")
-    return x_user_id
+def get_or_create_user_profile(session: Session, user_id: str):
+    """Get or create profile for specific user"""
+    user = get_user_by_id(session, user_id)
+
+    personal = None
+    if user:
+        personal = session.exec(
+            select(PersonalInfo).where(PersonalInfo.user_profile_id == user.id)
+        ).first()
+
+    if not user:
+        # Create default user with this user_id
+        try:
+            db_id = parse_user_id(user_id)
+        except ValueError:
+            raise HTTPException(
+                status_code=400,
+                detail="Invalid user_id format. Expected format: user_123",
+            )
+
+        default_profile = {
+            "education": [
+                {
+                    "institution": "University of Tech",
+                    "area": "Computer Science",
+                    "degree": "BS",
+                    "start_date": "2020-01",
+                    "end_date": "2024-01",
+                }
+            ],
+            "experience": [
+                {
+                    "company": "Tech Corp",
+                    "position": "Software Developer",
+                    "start_date": "2024-02",
+                    "end_date": "present",
+                    "highlights": [
+                        "Developed scalable APIs using Python and FastAPI",
+                        "Optimized database queries reducing response time by 40%",
+                    ],
+                }
+            ],
+            "skills": {
+                "languages": ["Python", "JavaScript"],
+                "tools": ["Git", "Docker", "AWS"],
+            },
+        }
+        user = UserProfile(user_id=user_id, profile_data=json.dumps(default_profile))
+        session.add(user)
+        session.commit()
+        session.refresh(user)
+
+    if not personal:
+        personal = PersonalInfo(
+            user_profile_id=user.id,
+            name="John Doe",
+            email="john@example.com",
+            phone="9876543210",
+            country_code="+91",
+            location="Thiruvananthapuram, Kerala, India",
+            social_networks=json.dumps(
+                [{"network": "LinkedIn", "username": "johndoe"}]
+            ),
+        )
+        session.add(personal)
+        session.commit()
+        session.refresh(personal)
+
+    return user, personal
+
+
+def get_task_by_id(session: Session, task_id: str) -> Optional[TaskLog]:
+    """Get task by task_id string (e.g., 'task_1')"""
+    try:
+        db_id = parse_task_id(task_id)
+        task = session.exec(select(TaskLog).where(TaskLog.id == db_id)).first()
+        return task
+    except ValueError:
+        return None
 
 
 # ============================================================================
@@ -505,61 +648,26 @@ class CreateUserRequest(BaseModel):
     phone: str = Field(..., example="9876543210")
     country_code: str = Field(default="+91", example="+91")
     location: str = Field(..., example="Mumbai, India")
-    social_networks: Optional[List[SocialNetworkInput]] = Field(
-        default=None,
-        example=[
-            {"network": "LinkedIn", "username": "johndoe"},
-            {"network": "GitHub", "username": "johndoe-dev"},
-        ],
-    )
+    social_networks: Optional[List[SocialNetworkInput]] = Field(default=None)
     profile_data: Optional[ProfileDataInput] = Field(default=None)
 
 
 class ResumeParseRequest(BaseModel):
     """Request to parse resume text"""
 
-    resume_text: str = Field(
-        ...,
-        example="""John Doe
-john.doe@example.com | +91-9876543210 | Mumbai, India | linkedin.com/in/johndoe
-
-EXPERIENCE
-
-Senior Software Engineer | TechCorp Inc. | Mumbai, India | June 2022 - Present
-• Led development of microservices architecture serving 1M+ users
-• Reduced API response time by 40% through optimization
-
-EDUCATION
-
-Bachelor of Technology in Computer Science | IIT Bombay | 2016 - 2020
-• GPA: 3.8/4.0
-
-SKILLS
-
-Languages: Python, JavaScript, Go
-Frameworks: FastAPI, Django, React
-""",
-        description="Complete resume text to parse",
-    )
+    resume_text: str = Field(..., description="Complete resume text to parse")
     overwrite_existing: bool = Field(
-        default=False, description="If true, overwrites existing profile"
+        default=False,
+        description="If true, overwrites existing profile. Only applicable when X-User-Id is provided.",
     )
 
 
 class GeneralResumeRequest(BaseModel):
     """Request to generate a general-purpose resume"""
 
-    enhancement_remarks: Optional[str] = Field(
-        default=None,
-        example="Make the resume more professional and emphasize leadership skills",
-        description="Optional instructions to enhance the resume",
-    )
-    ai_model: Optional[str] = Field(
-        default=None, example="google/gemini-2.5-flash-lite"
-    )
-    design_config: Optional[Dict[str, Any]] = Field(
-        default=None, example={"theme": "moderncv"}
-    )
+    enhancement_remarks: Optional[str] = Field(default=None)
+    ai_model: Optional[str] = Field(default=None)
+    design_config: Optional[Dict[str, Any]] = Field(default=None)
     locale_config: Optional[Dict[str, Any]] = None
     rendercv_settings: Optional[Dict[str, Any]] = None
 
@@ -569,20 +677,7 @@ class JobResumeRequest(BaseModel):
 
     title: str = Field(..., example="Senior Backend Engineer")
     company: str = Field(..., example="BigTech Corp")
-    description: str = Field(
-        ...,
-        example="""We are looking for a Senior Backend Engineer.
-
-Requirements:
-- 3+ years Python experience
-- FastAPI or Django
-- Microservices architecture
-- AWS or GCP
-
-Responsibilities:
-- Design scalable backend services
-- Mentor junior developers""",
-    )
+    description: str = Field(..., example="We are looking for...")
     ai_model: Optional[str] = Field(default=None)
     design_config: Optional[Dict[str, Any]] = Field(default=None)
     locale_config: Optional[Dict[str, Any]] = Field(default=None)
@@ -596,10 +691,7 @@ class RegenerateResumeRequest(BaseModel):
     design_config: Optional[Dict[str, Any]] = Field(default=None)
     locale_config: Optional[Dict[str, Any]] = None
     rendercv_settings: Optional[Dict[str, Any]] = None
-    improvement_remarks: Optional[str] = Field(
-        default=None,
-        example="Make the summary more concise and add quantifiable metrics",
-    )
+    improvement_remarks: Optional[str] = Field(default=None)
 
 
 class PersonalInfoUpdate(BaseModel):
@@ -608,9 +700,7 @@ class PersonalInfoUpdate(BaseModel):
     phone: str = Field(..., example="9876543210")
     country_code: str = Field(..., example="+91")
     location: str = Field(..., example="Mumbai, India")
-    social_networks: Optional[List[SocialNetworkInput]] = Field(
-        default=None, example=[{"network": "LinkedIn", "username": "johndoe"}]
-    )
+    social_networks: Optional[List[SocialNetworkInput]] = Field(default=None)
 
 
 class ProfileDataUpdate(BaseModel):
@@ -624,17 +714,13 @@ class ProfileDataUpdate(BaseModel):
 class AnalyzeProfileRequest(BaseModel):
     """Request to analyze user profile"""
 
-    ai_model: Optional[str] = Field(
-        default=None, example="google/gemini-2.5-flash-lite"
-    )
+    ai_model: Optional[str] = Field(default=None)
 
 
 class AnalyzeResumeRequest(BaseModel):
     """Request to analyze generated resume"""
 
-    ai_model: Optional[str] = Field(
-        default=None, example="google/gemini-2.5-flash-lite"
-    )
+    ai_model: Optional[str] = Field(default=None)
 
 
 # ============================================================================
@@ -645,7 +731,7 @@ def get_openrouter_model(model_id: Optional[str] = None):
     default_model = "google/gemini-2.5-flash-lite"
     return OpenAIChat(
         id=model_id or default_model,
-        api_key=api_key,
+        api_key=OPENROUTER_API_KEY,
         base_url="https://openrouter.ai/api/v1",
     )
 
@@ -733,30 +819,11 @@ def create_profile_analyzer_agent(model_id: Optional[str] = None) -> Agent:
             "- 40-59: Needs significant improvement",
             "- 0-39: Major gaps",
             "",
-            "STRENGTHS (3-5 items):",
-            "- Highlight genuine strong points",
-            "- Be specific (e.g., 'Strong quantifiable metrics')",
-            "",
-            "AREAS FOR IMPROVEMENT (3-5 items):",
-            "- Be constructive and specific",
-            "- Focus on high-impact improvements",
-            "",
-            "ACTIONABLE SUGGESTIONS (5-7 items):",
-            "- Concrete, implementable steps",
-            "- Prioritize by impact",
-            "",
-            "MISSING ELEMENTS:",
-            "- Identify critical gaps (projects, certifications, metrics, etc.)",
-            "",
             "KEYWORD OPTIMIZATION (REQUIRED):",
             "- MUST be a dictionary with string keys and list values",
             "- Example: {'technical_skills': ['Docker', 'AWS'], 'soft_skills': ['leadership']}",
             "- If no suggestions, return empty dict: {}",
             "- NEVER omit this field",
-            "",
-            "SUMMARY FEEDBACK (2-3 paragraphs):",
-            "- Personalized, encouraging advice",
-            "- End with motivation and next steps",
         ],
         output_schema=ProfileAnalysis,
         db=db,
@@ -776,40 +843,11 @@ def create_resume_analyzer_agent(model_id: Optional[str] = None) -> Agent:
             "",
             "CRITICAL: You MUST include ALL required fields in your response.",
             "",
-            "OVERALL SCORE (0-100):",
-            "- Overall resume quality",
-            "",
-            "ATS COMPATIBILITY SCORE (0-100):",
-            "- Keyword density, format simplicity, section clarity",
-            "- Consider: proper headers, no complex tables, keyword usage",
-            "",
-            "JOB ALIGNMENT SCORE (0-100, for job-tailored resumes only):",
-            "- How well resume aligns with target job",
-            "- Set to null for general resumes",
-            "",
-            "STRENGTHS (3-5 items):",
-            "- What works well in this resume",
-            "",
-            "AREAS FOR IMPROVEMENT (3-5 items):",
-            "- Specific weaknesses to address",
-            "",
-            "ACTIONABLE SUGGESTIONS (5-7 items):",
-            "- Concrete steps to improve the resume",
-            "",
-            "FORMATTING ISSUES (list):",
-            "- List structural or formatting problems",
-            "- Examples: 'Summary too long', 'Missing dates'",
-            "- If none, return empty list []",
-            "",
             "KEYWORD OPTIMIZATION (REQUIRED):",
             "- MUST be a dictionary with string keys and list values",
             "- Example: {'technical_skills': ['Docker', 'AWS'], 'soft_skills': ['leadership']}",
             "- If no suggestions, return empty dict: {}",
             "- NEVER omit this field",
-            "",
-            "SUMMARY FEEDBACK (2-3 paragraphs):",
-            "- Personalized advice",
-            "- Clear next steps",
         ],
         output_schema=ResumeAnalysis,
         db=db,
@@ -843,75 +881,13 @@ def create_resume_parser_agent(model_id: Optional[str] = None) -> Agent:
     )
 
 
-def get_or_create_user_profile(session: Session, user_id: str):
-    """Get or create profile for specific user"""
-    user = session.exec(
-        select(UserProfile).where(UserProfile.user_id == user_id)
-    ).first()
-
-    personal = session.exec(
-        select(PersonalInfo).where(PersonalInfo.user_id == user_id)
-    ).first()
-
-    if not user:
-        default_profile = {
-            "education": [
-                {
-                    "institution": "University of Tech",
-                    "area": "Computer Science",
-                    "degree": "BS",
-                    "start_date": "2020-01",
-                    "end_date": "2024-01",
-                }
-            ],
-            "experience": [
-                {
-                    "company": "Tech Corp",
-                    "position": "Software Developer",
-                    "start_date": "2024-02",
-                    "end_date": "present",
-                    "highlights": [
-                        "Developed scalable APIs using Python and FastAPI",
-                        "Optimized database queries reducing response time by 40%",
-                    ],
-                }
-            ],
-            "skills": {
-                "languages": ["Python", "JavaScript"],
-                "tools": ["Git", "Docker", "AWS"],
-            },
-        }
-        user = UserProfile(user_id=user_id, profile_data=json.dumps(default_profile))
-        session.add(user)
-        session.commit()
-        session.refresh(user)
-
-    if not personal:
-        personal = PersonalInfo(
-            user_id=user_id,
-            name="John Doe",
-            email="john@example.com",
-            phone="9876543210",
-            country_code="+91",
-            location="Thiruvananthapuram, Kerala, India",
-            social_networks=json.dumps(
-                [{"network": "LinkedIn", "username": "johndoe"}]
-            ),
-        )
-        session.add(personal)
-        session.commit()
-        session.refresh(personal)
-
-    return user, personal
-
-
 # ============================================================================
 # HUEY TASKS (Background Workers)
 # ============================================================================
 @huey.task()
 def process_analysis_task(
     task_id: str,
-    user_id: str,
+    user_profile_id: int,
     title: str,
     company: str,
     description: str,
@@ -922,7 +898,7 @@ def process_analysis_task(
     logger.info(f"--- Starting Job Analysis: {task_id} ---")
 
     with Session(engine) as session:
-        task = session.get(TaskLog, task_id)
+        task = get_task_by_id(session, task_id)
         if not task:
             return
 
@@ -938,7 +914,7 @@ def process_analysis_task(
             response = analyzer.run(prompt)
 
             analysis = JobAnalysis(
-                user_id=user_id,
+                user_profile_id=user_profile_id,
                 job_id=job_id,
                 analysis_text=response.content,
                 ai_model=ai_model,
@@ -981,7 +957,7 @@ def process_job_tailored_resume_task(
     logger.info(f"--- Starting Job-Tailored Resume: {task_id} ---")
 
     with Session(engine) as session:
-        task = session.get(TaskLog, task_id)
+        task = get_task_by_id(session, task_id)
         if not task or not task.job_id:
             return
 
@@ -999,10 +975,16 @@ def process_job_tailored_resume_task(
             analysis = session.exec(
                 select(JobAnalysis)
                 .where(JobAnalysis.job_id == task.job_id)
-                .where(JobAnalysis.user_id == task.user_id)
+                .where(JobAnalysis.user_profile_id == task.user_profile_id)
                 .order_by(JobAnalysis.id.desc())
             ).first()
-            user, personal = get_or_create_user_profile(session, task.user_id)
+
+            user = session.get(UserProfile, task.user_profile_id)
+            personal = session.exec(
+                select(PersonalInfo).where(
+                    PersonalInfo.user_profile_id == task.user_profile_id
+                )
+            ).first()
 
             if not analysis:
                 raise ValueError("No analysis found")
@@ -1010,7 +992,7 @@ def process_job_tailored_resume_task(
             existing_resume = session.exec(
                 select(ResumeContent)
                 .where(ResumeContent.job_id == task.job_id)
-                .where(ResumeContent.user_id == task.user_id)
+                .where(ResumeContent.user_profile_id == task.user_profile_id)
                 .order_by(ResumeContent.created_at.desc())
             ).first()
 
@@ -1051,7 +1033,7 @@ def process_job_tailored_resume_task(
                 sections_dict = json.loads(existing_resume.content)
 
             resume_content = ResumeContent(
-                user_id=task.user_id,
+                user_profile_id=task.user_profile_id,
                 task_id=task_id,
                 job_id=task.job_id,
                 content=json.dumps(sections_dict),
@@ -1097,7 +1079,7 @@ def process_general_resume_task(
     logger.info(f"--- Starting General Resume: {task_id} ---")
 
     with Session(engine) as session:
-        task = session.get(TaskLog, task_id)
+        task = get_task_by_id(session, task_id)
         if not task:
             return
 
@@ -1108,7 +1090,12 @@ def process_general_resume_task(
             session.add(task)
             session.commit()
 
-            user, personal = get_or_create_user_profile(session, task.user_id)
+            user = session.get(UserProfile, task.user_profile_id)
+            personal = session.exec(
+                select(PersonalInfo).where(
+                    PersonalInfo.user_profile_id == task.user_profile_id
+                )
+            ).first()
 
             generator = create_general_resume_generator_agent(ai_model)
             prompt = f"Create a professional general-purpose resume:\n\nPROFILE:\n{user.profile_data}"
@@ -1134,7 +1121,7 @@ def process_general_resume_task(
             sections_dict = resume_sections_obj.model_dump(exclude_none=True)
 
             resume_content = ResumeContent(
-                user_id=task.user_id,
+                user_profile_id=task.user_profile_id,
                 task_id=task_id,
                 job_id=None,
                 content=json.dumps(sections_dict),
@@ -1208,9 +1195,45 @@ def _render_pdf(
     if rendercv_settings_override:
         full_cv_dict["rendercv_settings"] = rendercv_settings_override
 
+    # Normalize social networks format
     social_networks = json.loads(personal.social_networks)
     if social_networks:
-        full_cv_dict["cv"]["social_networks"] = social_networks
+        normalized_social_networks = []
+
+        for item in social_networks:
+            # Check if it's already in correct format (has 'network' and 'username')
+            if "network" in item and "username" in item:
+                normalized_social_networks.append(item)
+            else:
+                # Handle old format where keys are network names
+                for network_key, url in item.items():
+                    network_name = network_key.capitalize()
+
+                    # Extract username from URL
+                    username = url
+                    if isinstance(url, str):
+                        # Try to extract username from common URL patterns
+                        if "linkedin.com/in/" in url:
+                            username = url.split("/in/")[-1].strip("/")
+                            network_name = "LinkedIn"
+                        elif "github.com/" in url:
+                            username = url.split("github.com/")[-1].strip("/")
+                            network_name = "GitHub"
+                        elif "twitter.com/" in url or "x.com/" in url:
+                            username = url.split("/")[-1].strip("/")
+                            network_name = "Twitter"
+                        else:
+                            # For portfolio or other URLs, use the full URL as username
+                            username = url
+                            if "portfolio" in network_key.lower():
+                                network_name = "Portfolio"
+
+                    normalized_social_networks.append(
+                        {"network": network_name, "username": username}
+                    )
+
+        if normalized_social_networks:
+            full_cv_dict["cv"]["social_networks"] = normalized_social_networks
 
     output_dir = Path("output") / task.task_id
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -1247,22 +1270,30 @@ def on_startup():
     create_db_and_tables()
 
 
-@app.post("/users", dependencies=[Depends(verify_api_key)], response_model=APIResponse)
-def create_user(
+@app.post("/users", response_model=APIResponse, tags=["User Management"])
+async def create_user(
     request: CreateUserRequest,
-    user_id: str = Depends(get_user_id),
+    api_key: str = Depends(verify_api_key),
+    user_id: Optional[str] = Depends(get_optional_user_id),
     session: Session = Depends(get_session),
 ):
-    """Create a new user profile with personal information"""
-    existing = session.exec(
-        select(UserProfile).where(UserProfile.user_id == user_id)
-    ).first()
+    """
+    Create a new user profile with personal information.
 
-    if existing:
-        return APIResponse(
-            success=False, message="User already exists", error="USER_EXISTS"
-        )
+    The user_id will be auto-generated (user_1, user_2, etc.) if not provided.
+    Returns the user_id which should be used for all subsequent requests.
+    """
+    # If user_id provided, check if it exists
+    if user_id:
+        existing = get_user_by_id(session, user_id)
+        if existing:
+            return APIResponse(
+                success=False,
+                message="User already exists with this user_id",
+                error="USER_EXISTS",
+            )
 
+    # Prepare profile data
     if request.profile_data:
         profile_data_json = json.dumps(
             request.profile_data.model_dump(exclude_none=True)
@@ -1271,17 +1302,29 @@ def create_user(
         default_profile = {"education": [], "experience": [], "skills": {}}
         profile_data_json = json.dumps(default_profile)
 
-    user = UserProfile(user_id=user_id, profile_data=profile_data_json)
+    # Create user profile (let database auto-increment the ID)
+    user = UserProfile(
+        user_id="",  # Will be updated after we know the ID
+        profile_data=profile_data_json,
+    )
     session.add(user)
     session.commit()
     session.refresh(user)
 
+    # Update user_id with the generated format
+    user.user_id = generate_user_id(user.id)
+    session.add(user)
+    session.commit()
+    session.refresh(user)
+
+    # Prepare social networks
     social_networks_list = []
     if request.social_networks:
         social_networks_list = [sn.model_dump() for sn in request.social_networks]
 
+    # Create personal info
     personal = PersonalInfo(
-        user_id=user_id,
+        user_profile_id=user.id,
         name=request.name,
         email=request.email,
         phone=request.phone,
@@ -1295,9 +1338,9 @@ def create_user(
 
     return APIResponse(
         success=True,
-        message="User profile created successfully",
+        message="User profile created successfully. Use this user_id for all future requests.",
         data={
-            "user_id": user_id,
+            "user_id": user.user_id,  # Returns user_1, user_2, etc.
             "name": personal.name,
             "email": personal.email,
             "created_at": user.created_at.isoformat(),
@@ -1305,30 +1348,42 @@ def create_user(
     )
 
 
-@app.post(
-    "/users/from-resume",
-    dependencies=[Depends(verify_api_key)],
-    response_model=APIResponse,
-)
-def create_user_from_resume(
+@app.post("/users/from-resume", response_model=APIResponse, tags=["User Management"])
+async def create_user_from_resume(
     request: ResumeParseRequest,
-    user_id: str = Depends(get_user_id),
+    api_key: str = Depends(verify_api_key),
+    user_id: Optional[str] = Depends(get_optional_user_id),
     session: Session = Depends(get_session),
 ):
-    """Parse resume text using AI and automatically create user profile"""
-    try:
-        existing_user = session.exec(
-            select(UserProfile).where(UserProfile.user_id == user_id)
-        ).first()
+    """
+    Parse resume text using AI and automatically create or update user profile.
 
+    **Three scenarios:**
+    1. **No X-User-Id provided**: Auto-generates new user_id and creates new profile
+    2. **X-User-Id provided + user doesn't exist**: Creates new user with that user_id
+    3. **X-User-Id provided + user exists**:
+       - If `overwrite_existing=false`: Returns error
+       - If `overwrite_existing=true`: Updates existing profile
+
+    Returns the user_id which should be used for all subsequent requests.
+    """
+    try:
+        # Check if user exists
+        existing_user = None
+        if user_id:
+            existing_user = get_user_by_id(session, user_id)
+
+        # If user exists but overwrite not allowed
         if existing_user and not request.overwrite_existing:
             return APIResponse(
                 success=False,
-                message="User already exists. Set overwrite_existing=true to update.",
+                message="User already exists. Set overwrite_existing=true to update profile.",
                 error="USER_EXISTS",
+                data={"user_id": user_id},
             )
 
-        logger.info(f"Parsing resume for user: {user_id}")
+        # Parse resume using AI
+        logger.info(f"Parsing resume for user: {user_id or 'new'}")
         parser = create_resume_parser_agent()
 
         response = parser.run(f"Parse the following resume:\n\n{request.resume_text}")
@@ -1344,6 +1399,7 @@ def create_user_from_resume(
 
         logger.info(f"Resume parsed. Tokens: {tokens_used}")
 
+        # Prepare profile data
         profile_data = {
             "education": [
                 edu.model_dump(exclude_none=True) for edu in extracted.education
@@ -1354,18 +1410,34 @@ def create_user_from_resume(
             "skills": extracted.skills.model_dump(exclude_none=True),
         }
 
+        # Create or update user profile
         if existing_user:
             existing_user.profile_data = json.dumps(profile_data)
             existing_user.updated_at = datetime.now()
             session.add(existing_user)
+            session.commit()
+            user = existing_user
+            logger.info(f"Updated existing user profile: {user_id}")
         else:
-            user = UserProfile(user_id=user_id, profile_data=json.dumps(profile_data))
+            # Create new user
+            user = UserProfile(
+                user_id="",  # Will be updated after we know the ID
+                profile_data=json.dumps(profile_data),
+            )
             session.add(user)
+            session.commit()
+            session.refresh(user)
 
-        session.commit()
+            # Update user_id with the generated format
+            user.user_id = generate_user_id(user.id)
+            session.add(user)
+            session.commit()
+            session.refresh(user)
+            logger.info(f"Created new user profile: {user.user_id}")
 
+        # Create or update personal info
         existing_personal = session.exec(
-            select(PersonalInfo).where(PersonalInfo.user_id == user_id)
+            select(PersonalInfo).where(PersonalInfo.user_profile_id == user.id)
         ).first()
 
         contact = extracted.contact_info
@@ -1382,7 +1454,7 @@ def create_user_from_resume(
             session.add(existing_personal)
         else:
             personal = PersonalInfo(
-                user_id=user_id,
+                user_profile_id=user.id,
                 name=contact.name,
                 email=contact.email,
                 phone=contact.phone,
@@ -1396,14 +1468,15 @@ def create_user_from_resume(
 
         return APIResponse(
             success=True,
-            message="User profile created successfully from resume",
+            message=f"User profile {'updated' if existing_user else 'created'} successfully from resume. Use this user_id for all future requests.",
             data={
-                "user_id": user_id,
+                "user_id": user.user_id,  # Returns user_1, user_2, etc.
                 "name": contact.name,
                 "email": contact.email,
                 "education_count": len(extracted.education),
                 "experience_count": len(extracted.experience),
                 "tokens_used": tokens_used,
+                "was_updated": bool(existing_user),
                 "extracted_data": {
                     "contact_info": contact.model_dump(),
                     "education": [edu.model_dump() for edu in extracted.education],
@@ -1422,11 +1495,11 @@ def create_user_from_resume(
         )
 
 
-@app.get(
-    "/users/me", dependencies=[Depends(verify_api_key)], response_model=APIResponse
-)
-def get_user_profile(
-    user_id: str = Depends(get_user_id), session: Session = Depends(get_session)
+@app.get("/users/me", response_model=APIResponse, tags=["User Management"])
+async def get_user_profile(
+    api_key: str = Depends(verify_api_key),
+    user_id: str = Depends(get_user_id),
+    session: Session = Depends(get_session),
 ):
     """Get complete user profile"""
     user, personal = get_or_create_user_profile(session, user_id)
@@ -1451,13 +1524,10 @@ def get_user_profile(
     )
 
 
-@app.put(
-    "/users/me/contact",
-    dependencies=[Depends(verify_api_key)],
-    response_model=APIResponse,
-)
-def update_personal_info(
+@app.put("/users/me/contact", response_model=APIResponse, tags=["User Management"])
+async def update_personal_info(
     data: PersonalInfoUpdate,
+    api_key: str = Depends(verify_api_key),
     user_id: str = Depends(get_user_id),
     session: Session = Depends(get_session),
 ):
@@ -1485,13 +1555,10 @@ def update_personal_info(
     )
 
 
-@app.put(
-    "/users/me/profile",
-    dependencies=[Depends(verify_api_key)],
-    response_model=APIResponse,
-)
-def update_profile_data(
+@app.put("/users/me/profile", response_model=APIResponse, tags=["User Management"])
+async def update_profile_data(
     data: ProfileDataUpdate,
+    api_key: str = Depends(verify_api_key),
     user_id: str = Depends(get_user_id),
     session: Session = Depends(get_session),
 ):
@@ -1527,27 +1594,15 @@ def update_profile_data(
 # ============================================================================
 # API Endpoints - Profile Analysis
 # ============================================================================
-@app.post(
-    "/profile/analyze",
-    dependencies=[Depends(verify_api_key)],
-    response_model=APIResponse,
-)
-def analyze_profile(
+@app.post("/profile/analyze", response_model=APIResponse, tags=["Profile Analysis"])
+async def analyze_profile(
     request: AnalyzeProfileRequest,
+    api_key: str = Depends(verify_api_key),
     user_id: str = Depends(get_user_id),
     session: Session = Depends(get_session),
 ):
     """
     Analyze user's raw profile and get actionable feedback.
-
-    Returns comprehensive analysis including:
-    - Overall profile strength score (0-100)
-    - Key strengths
-    - Areas for improvement
-    - Actionable suggestions
-    - Missing elements
-    - Keyword optimization tips
-    - Detailed summary feedback
     """
     try:
         user, personal = get_or_create_user_profile(session, user_id)
@@ -1571,7 +1626,6 @@ Social Networks: {personal.social_networks}
             f"Analyze this profile and provide comprehensive feedback:\n\n{profile_summary}"
         )
 
-        # Check if response.content is a valid ProfileAnalysis object
         if not isinstance(response.content, ProfileAnalysis):
             logger.error(
                 f"AI agent returned invalid response type: {type(response.content)}"
@@ -1594,7 +1648,7 @@ Social Networks: {personal.social_networks}
         logger.info(f"Profile analyzed. Tokens: {tokens_used}")
 
         analysis_record = ProfileAnalysisRecord(
-            user_id=user_id,
+            user_profile_id=user.id,
             analysis_data=json.dumps(analysis.model_dump()),
             ai_model=request.ai_model,
         )
@@ -1630,17 +1684,23 @@ Social Networks: {personal.social_networks}
 
 
 @app.get(
-    "/profile/analyze/history",
-    dependencies=[Depends(verify_api_key)],
-    response_model=APIResponse,
+    "/profile/analyze/history", response_model=APIResponse, tags=["Profile Analysis"]
 )
-def get_profile_analysis_history(
-    user_id: str = Depends(get_user_id), session: Session = Depends(get_session)
+async def get_profile_analysis_history(
+    api_key: str = Depends(verify_api_key),
+    user_id: str = Depends(get_user_id),
+    session: Session = Depends(get_session),
 ):
     """Get history of profile analyses for the user"""
+    user = get_user_by_id(session, user_id)
+    if not user:
+        return APIResponse(
+            success=False, message="User not found", error="USER_NOT_FOUND"
+        )
+
     analyses = session.exec(
         select(ProfileAnalysisRecord)
-        .where(ProfileAnalysisRecord.user_id == user_id)
+        .where(ProfileAnalysisRecord.user_profile_id == user.id)
         .order_by(ProfileAnalysisRecord.created_at.desc())
     ).all()
 
@@ -1664,19 +1724,26 @@ def get_profile_analysis_history(
 
 @app.get(
     "/profile/analyze/{analysis_id}",
-    dependencies=[Depends(verify_api_key)],
     response_model=APIResponse,
+    tags=["Profile Analysis"],
 )
-def get_profile_analysis_details(
+async def get_profile_analysis_details(
     analysis_id: int,
+    api_key: str = Depends(verify_api_key),
     user_id: str = Depends(get_user_id),
     session: Session = Depends(get_session),
 ):
     """Get detailed results of a specific profile analysis"""
+    user = get_user_by_id(session, user_id)
+    if not user:
+        return APIResponse(
+            success=False, message="User not found", error="USER_NOT_FOUND"
+        )
+
     analysis_record = session.exec(
         select(ProfileAnalysisRecord)
         .where(ProfileAnalysisRecord.id == analysis_id)
-        .where(ProfileAnalysisRecord.user_id == user_id)
+        .where(ProfileAnalysisRecord.user_profile_id == user.id)
     ).first()
 
     if not analysis_record:
@@ -1701,27 +1768,26 @@ def get_profile_analysis_details(
 # ============================================================================
 # API Endpoints - Resume Generation
 # ============================================================================
-@app.post(
-    "/resumes/generate",
-    dependencies=[Depends(verify_api_key)],
-    response_model=APIResponse,
-)
-def generate_general_resume(
+@app.post("/resumes/generate", response_model=APIResponse, tags=["Resume Generation"])
+async def generate_general_resume(
     request: GeneralResumeRequest,
+    api_key: str = Depends(verify_api_key),
     user_id: str = Depends(get_user_id),
     session: Session = Depends(get_session),
 ):
     """
     Generate a general-purpose resume from user profile (no job description).
-
-    Creates a polished, professional resume based on the user's profile.
-    For feedback on your profile, use POST /profile/analyze instead.
     """
-    task_id = str(uuid.uuid4())
+    user = get_user_by_id(session, user_id)
+    if not user:
+        return APIResponse(
+            success=False, message="User not found", error="USER_NOT_FOUND"
+        )
 
+    # Create task log
     task = TaskLog(
-        task_id=task_id,
-        user_id=user_id,
+        task_id="",  # Will be updated
+        user_profile_id=user.id,
         task_type="general",
         status="pending",
         logs=[f"[{datetime.now()}] General resume task created"],
@@ -1729,9 +1795,16 @@ def generate_general_resume(
     )
     session.add(task)
     session.commit()
+    session.refresh(task)
+
+    # Update task_id with the generated format
+    task.task_id = generate_task_id(task.id)
+    session.add(task)
+    session.commit()
+    session.refresh(task)
 
     process_general_resume_task(
-        task_id,
+        task.task_id,
         enhancement_remarks=request.enhancement_remarks,
         design_override=request.design_config,
         locale_override=request.locale_config,
@@ -1742,29 +1815,34 @@ def generate_general_resume(
     return APIResponse(
         success=True,
         message="General resume generation started",
-        data={"task_id": task_id, "status": "resume_pending", "type": "general"},
+        data={"task_id": task.task_id, "status": "resume_pending", "type": "general"},
     )
 
 
 @app.post(
-    "/resumes/job-tailored",
-    dependencies=[Depends(verify_api_key)],
-    response_model=APIResponse,
+    "/resumes/job-tailored", response_model=APIResponse, tags=["Resume Generation"]
 )
-def generate_job_tailored_resume(
+async def generate_job_tailored_resume(
     request: JobResumeRequest,
+    api_key: str = Depends(verify_api_key),
     user_id: str = Depends(get_user_id),
     session: Session = Depends(get_session),
 ):
     """Generate a job-tailored resume optimized for a specific job description"""
-    task_id = str(uuid.uuid4())
+    user = get_user_by_id(session, user_id)
+    if not user:
+        return APIResponse(
+            success=False, message="User not found", error="USER_NOT_FOUND"
+        )
+
     content_hash = hashlib.sha256(
         request.description.strip().encode("utf-8")
     ).hexdigest()
 
+    # Create task log
     task = TaskLog(
-        task_id=task_id,
-        user_id=user_id,
+        task_id="",  # Will be updated
+        user_profile_id=user.id,
         task_type="job_tailored",
         status="pending",
         logs=[f"[{datetime.now()}] Job-tailored resume task created"],
@@ -1774,7 +1852,7 @@ def generate_job_tailored_resume(
     existing_jd = session.exec(
         select(JobDescription)
         .where(JobDescription.content_hash == content_hash)
-        .where(JobDescription.user_id == user_id)
+        .where(JobDescription.user_profile_id == user.id)
     ).first()
 
     if existing_jd:
@@ -1782,7 +1860,7 @@ def generate_job_tailored_resume(
         existing_analysis = session.exec(
             select(JobAnalysis)
             .where(JobAnalysis.job_id == existing_jd.id)
-            .where(JobAnalysis.user_id == user_id)
+            .where(JobAnalysis.user_profile_id == user.id)
         ).first()
 
         if existing_analysis:
@@ -1790,9 +1868,16 @@ def generate_job_tailored_resume(
             task.logs.append(f"[{datetime.now()}] Using cached analysis")
             session.add(task)
             session.commit()
+            session.refresh(task)
+
+            # Update task_id with the generated format
+            task.task_id = generate_task_id(task.id)
+            session.add(task)
+            session.commit()
+            session.refresh(task)
 
             process_job_tailored_resume_task(
-                task_id,
+                task.task_id,
                 design_override=request.design_config,
                 locale_override=request.locale_config,
                 rendercv_settings_override=request.rendercv_settings,
@@ -1803,7 +1888,7 @@ def generate_job_tailored_resume(
                 success=True,
                 message="Analysis cached. Resume generation started.",
                 data={
-                    "task_id": task_id,
+                    "task_id": task.task_id,
                     "status": "resume_pending",
                     "type": "job_tailored",
                 },
@@ -1811,9 +1896,17 @@ def generate_job_tailored_resume(
 
         session.add(task)
         session.commit()
+        session.refresh(task)
+
+        # Update task_id with the generated format
+        task.task_id = generate_task_id(task.id)
+        session.add(task)
+        session.commit()
+        session.refresh(task)
+
         process_analysis_task(
-            task_id,
-            user_id,
+            task.task_id,
+            user.id,
             request.title,
             request.company,
             request.description,
@@ -1824,14 +1917,14 @@ def generate_job_tailored_resume(
             success=True,
             message="JD found. Starting analysis and resume generation.",
             data={
-                "task_id": task_id,
+                "task_id": task.task_id,
                 "status": "analysis_pending",
                 "type": "job_tailored",
             },
         )
 
     new_jd = JobDescription(
-        user_id=user_id,
+        user_profile_id=user.id,
         title=request.title,
         company=request.company,
         description=request.description,
@@ -1844,10 +1937,17 @@ def generate_job_tailored_resume(
     task.job_id = new_jd.id
     session.add(task)
     session.commit()
+    session.refresh(task)
+
+    # Update task_id with the generated format
+    task.task_id = generate_task_id(task.id)
+    session.add(task)
+    session.commit()
+    session.refresh(task)
 
     process_analysis_task(
-        task_id,
-        user_id,
+        task.task_id,
+        user.id,
         request.title,
         request.company,
         request.description,
@@ -1858,39 +1958,37 @@ def generate_job_tailored_resume(
     return APIResponse(
         success=True,
         message="Job submitted. Starting analysis and resume generation.",
-        data={"task_id": task_id, "status": "analysis_pending", "type": "job_tailored"},
+        data={
+            "task_id": task.task_id,
+            "status": "analysis_pending",
+            "type": "job_tailored",
+        },
     )
 
 
 @app.post(
-    "/resumes/{task_id}/analyze",
-    dependencies=[Depends(verify_api_key)],
-    response_model=APIResponse,
+    "/resumes/{task_id}/analyze", response_model=APIResponse, tags=["Resume Analysis"]
 )
-def analyze_resume(
+async def analyze_resume(
     task_id: str,
     request: AnalyzeResumeRequest,
+    api_key: str = Depends(verify_api_key),
     user_id: str = Depends(get_user_id),
     session: Session = Depends(get_session),
 ):
     """
     Analyze a generated resume and get actionable feedback.
-
-    Returns comprehensive analysis including:
-    - Overall resume quality score (0-100)
-    - ATS compatibility score (0-100)
-    - Job alignment score (for job-tailored resumes)
-    - Strengths
-    - Areas for improvement
-    - Actionable suggestions
-    - Formatting issues
-    - Keyword optimization tips
-    - Detailed summary feedback
     """
     try:
+        user = get_user_by_id(session, user_id)
+        if not user:
+            return APIResponse(
+                success=False, message="User not found", error="USER_NOT_FOUND"
+            )
+
         # Verify task belongs to user
-        task = session.get(TaskLog, task_id)
-        if not task or task.user_id != user_id:
+        task = get_task_by_id(session, task_id)
+        if not task or task.user_profile_id != user.id:
             return APIResponse(
                 success=False,
                 message="Task not found or does not belong to user",
@@ -1901,7 +1999,7 @@ def analyze_resume(
         resume = session.exec(
             select(ResumeContent)
             .where(ResumeContent.task_id == task_id)
-            .where(ResumeContent.user_id == user_id)
+            .where(ResumeContent.user_profile_id == user.id)
         ).first()
 
         if not resume:
@@ -1911,7 +2009,9 @@ def analyze_resume(
                 error="RESUME_NOT_FOUND",
             )
 
-        user, personal = get_or_create_user_profile(session, user_id)
+        personal = session.exec(
+            select(PersonalInfo).where(PersonalInfo.user_profile_id == user.id)
+        ).first()
 
         logger.info(f"Analyzing resume for task: {task_id}")
 
@@ -1944,7 +2044,6 @@ RESUME CONTENT:
             f"Analyze this generated resume:\n\n{content_to_analyze}"
         )
 
-        # Check if response.content is a valid ResumeAnalysis object
         if not isinstance(response.content, ResumeAnalysis):
             logger.error(
                 f"AI agent returned invalid response type: {type(response.content)}"
@@ -1969,7 +2068,7 @@ RESUME CONTENT:
 
         # Store analysis
         analysis_record = ResumeAnalysisRecord(
-            user_id=user_id,
+            user_profile_id=user.id,
             task_id=task_id,
             analysis_data=json.dumps(analysis.model_dump()),
             ai_model=request.ai_model,
@@ -2010,17 +2109,23 @@ RESUME CONTENT:
 
 
 @app.get(
-    "/resumes/analyze/history",
-    dependencies=[Depends(verify_api_key)],
-    response_model=APIResponse,
+    "/resumes/analyze/history", response_model=APIResponse, tags=["Resume Analysis"]
 )
-def get_resume_analysis_history(
-    user_id: str = Depends(get_user_id), session: Session = Depends(get_session)
+async def get_resume_analysis_history(
+    api_key: str = Depends(verify_api_key),
+    user_id: str = Depends(get_user_id),
+    session: Session = Depends(get_session),
 ):
     """Get history of all resume analyses for the user"""
+    user = get_user_by_id(session, user_id)
+    if not user:
+        return APIResponse(
+            success=False, message="User not found", error="USER_NOT_FOUND"
+        )
+
     analyses = session.exec(
         select(ResumeAnalysisRecord)
-        .where(ResumeAnalysisRecord.user_id == user_id)
+        .where(ResumeAnalysisRecord.user_profile_id == user.id)
         .order_by(ResumeAnalysisRecord.created_at.desc())
     ).all()
 
@@ -2048,19 +2153,26 @@ def get_resume_analysis_history(
 
 @app.get(
     "/resumes/analyze/{analysis_id}",
-    dependencies=[Depends(verify_api_key)],
     response_model=APIResponse,
+    tags=["Resume Analysis"],
 )
-def get_resume_analysis_details(
+async def get_resume_analysis_details(
     analysis_id: int,
+    api_key: str = Depends(verify_api_key),
     user_id: str = Depends(get_user_id),
     session: Session = Depends(get_session),
 ):
     """Get detailed results of a specific resume analysis"""
+    user = get_user_by_id(session, user_id)
+    if not user:
+        return APIResponse(
+            success=False, message="User not found", error="USER_NOT_FOUND"
+        )
+
     analysis_record = session.exec(
         select(ResumeAnalysisRecord)
         .where(ResumeAnalysisRecord.id == analysis_id)
-        .where(ResumeAnalysisRecord.user_id == user_id)
+        .where(ResumeAnalysisRecord.user_profile_id == user.id)
     ).first()
 
     if not analysis_record:
@@ -2084,16 +2196,24 @@ def get_resume_analysis_details(
 
 
 # ============================================================================
-# API Endpoints - Job Management (for reference)
+# API Endpoints - Job Management
 # ============================================================================
-@app.get("/jobs", dependencies=[Depends(verify_api_key)], response_model=APIResponse)
-def list_jobs(
-    user_id: str = Depends(get_user_id), session: Session = Depends(get_session)
+@app.get("/jobs", response_model=APIResponse, tags=["Jobs"])
+async def list_jobs(
+    api_key: str = Depends(verify_api_key),
+    user_id: str = Depends(get_user_id),
+    session: Session = Depends(get_session),
 ):
     """Get all job descriptions submitted by user"""
+    user = get_user_by_id(session, user_id)
+    if not user:
+        return APIResponse(
+            success=False, message="User not found", error="USER_NOT_FOUND"
+        )
+
     jobs = session.exec(
         select(JobDescription)
-        .where(JobDescription.user_id == user_id)
+        .where(JobDescription.user_profile_id == user.id)
         .order_by(JobDescription.created_at.desc())
     ).all()
 
@@ -2119,14 +2239,22 @@ def list_jobs(
 # ============================================================================
 # API Endpoints - Task Management
 # ============================================================================
-@app.get("/tasks", dependencies=[Depends(verify_api_key)], response_model=APIResponse)
-def list_tasks(
-    user_id: str = Depends(get_user_id), session: Session = Depends(get_session)
+@app.get("/tasks", response_model=APIResponse, tags=["Tasks"])
+async def list_tasks(
+    api_key: str = Depends(verify_api_key),
+    user_id: str = Depends(get_user_id),
+    session: Session = Depends(get_session),
 ):
     """Get all tasks for a specific user"""
+    user = get_user_by_id(session, user_id)
+    if not user:
+        return APIResponse(
+            success=False, message="User not found", error="USER_NOT_FOUND"
+        )
+
     tasks = session.exec(
         select(TaskLog)
-        .where(TaskLog.user_id == user_id)
+        .where(TaskLog.user_profile_id == user.id)
         .order_by(TaskLog.created_at.desc())
     ).all()
 
@@ -2152,19 +2280,22 @@ def list_tasks(
     )
 
 
-@app.get(
-    "/tasks/{task_id}",
-    dependencies=[Depends(verify_api_key)],
-    response_model=APIResponse,
-)
-def get_task(
+@app.get("/tasks/{task_id}", response_model=APIResponse, tags=["Tasks"])
+async def get_task(
     task_id: str,
+    api_key: str = Depends(verify_api_key),
     user_id: str = Depends(get_user_id),
     session: Session = Depends(get_session),
 ):
     """Get status and details of a specific task"""
-    task = session.get(TaskLog, task_id)
-    if not task or task.user_id != user_id:
+    user = get_user_by_id(session, user_id)
+    if not user:
+        return APIResponse(
+            success=False, message="User not found", error="USER_NOT_FOUND"
+        )
+
+    task = get_task_by_id(session, task_id)
+    if not task or task.user_profile_id != user.id:
         return APIResponse(
             success=False, message="Task not found", error="TASK_NOT_FOUND"
         )
@@ -2189,21 +2320,24 @@ def get_task(
     )
 
 
-@app.get(
-    "/tasks/{task_id}/resume",
-    dependencies=[Depends(verify_api_key)],
-    response_model=APIResponse,
-)
-def get_task_resume(
+@app.get("/tasks/{task_id}/resume", response_model=APIResponse, tags=["Tasks"])
+async def get_task_resume(
     task_id: str,
+    api_key: str = Depends(verify_api_key),
     user_id: str = Depends(get_user_id),
     session: Session = Depends(get_session),
 ):
     """Get the AI-generated resume content"""
+    user = get_user_by_id(session, user_id)
+    if not user:
+        return APIResponse(
+            success=False, message="User not found", error="USER_NOT_FOUND"
+        )
+
     resume = session.exec(
         select(ResumeContent)
         .where(ResumeContent.task_id == task_id)
-        .where(ResumeContent.user_id == user_id)
+        .where(ResumeContent.user_profile_id == user.id)
     ).first()
 
     if not resume:
@@ -2234,28 +2368,31 @@ def get_task_resume(
     )
 
 
-@app.post(
-    "/tasks/{task_id}/regenerate",
-    dependencies=[Depends(verify_api_key)],
-    response_model=APIResponse,
-)
-def regenerate_resume(
+@app.post("/tasks/{task_id}/regenerate", response_model=APIResponse, tags=["Tasks"])
+async def regenerate_resume(
     task_id: str,
     request: RegenerateResumeRequest,
+    api_key: str = Depends(verify_api_key),
     user_id: str = Depends(get_user_id),
     session: Session = Depends(get_session),
 ):
     """Regenerate resume from existing task with new configurations"""
-    original_task = session.get(TaskLog, task_id)
-    if not original_task or original_task.user_id != user_id:
+    user = get_user_by_id(session, user_id)
+    if not user:
+        return APIResponse(
+            success=False, message="User not found", error="USER_NOT_FOUND"
+        )
+
+    original_task = get_task_by_id(session, task_id)
+    if not original_task or original_task.user_profile_id != user.id:
         return APIResponse(
             success=False, message="Original task not found", error="TASK_NOT_FOUND"
         )
 
-    new_task_id = str(uuid.uuid4())
+    # Create new task
     new_task = TaskLog(
-        task_id=new_task_id,
-        user_id=user_id,
+        task_id="",  # Will be updated
+        user_profile_id=user.id,
         job_id=original_task.job_id,
         task_type=original_task.task_type,
         status="resume_pending",
@@ -2264,10 +2401,17 @@ def regenerate_resume(
     )
     session.add(new_task)
     session.commit()
+    session.refresh(new_task)
+
+    # Update task_id with the generated format
+    new_task.task_id = generate_task_id(new_task.id)
+    session.add(new_task)
+    session.commit()
+    session.refresh(new_task)
 
     if original_task.task_type == "general":
         process_general_resume_task(
-            new_task_id,
+            new_task.task_id,
             enhancement_remarks=request.improvement_remarks,
             design_override=request.design_config,
             locale_override=request.locale_config,
@@ -2276,7 +2420,7 @@ def regenerate_resume(
         )
     else:
         process_job_tailored_resume_task(
-            new_task_id,
+            new_task.task_id,
             design_override=request.design_config,
             locale_override=request.locale_config,
             rendercv_settings_override=request.rendercv_settings,
@@ -2288,7 +2432,7 @@ def regenerate_resume(
         success=True,
         message="Resume regeneration started",
         data={
-            "task_id": new_task_id,
+            "task_id": new_task.task_id,
             "original_task_id": task_id,
             "type": original_task.task_type,
             "status": "resume_pending",
@@ -2297,47 +2441,54 @@ def regenerate_resume(
     )
 
 
-@app.get("/tasks/{task_id}/download")
-def download_task_pdf(
-    task_id: str, x_api_key: str = Header(...), x_user_id: str = Header(...)
+@app.get("/tasks/{task_id}/download", tags=["Tasks"])
+async def download_task_pdf(
+    task_id: str,
+    api_key: str = Depends(verify_api_key),
+    user_id: str = Depends(get_user_id),
+    session: Session = Depends(get_session),
 ):
     """Download PDF file for a specific task"""
-    if x_api_key != API_TOKEN:
-        raise HTTPException(status_code=401, detail="Unauthorized")
+    user = get_user_by_id(session, user_id)
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
 
-    with Session(engine) as session:
-        task = session.get(TaskLog, task_id)
-        if not task or task.user_id != x_user_id:
-            raise HTTPException(status_code=404, detail="Task not found")
+    task = get_task_by_id(session, task_id)
+    if not task or task.user_profile_id != user.id:
+        raise HTTPException(status_code=404, detail="Task not found")
 
-        if not task.pdf_path:
-            raise HTTPException(status_code=404, detail="PDF not yet generated")
+    if not task.pdf_path:
+        raise HTTPException(status_code=404, detail="PDF not yet generated")
 
-        file_path = Path(task.pdf_path)
+    file_path = Path(task.pdf_path)
 
-        if not file_path.exists():
-            raise HTTPException(status_code=404, detail="File not found")
+    if not file_path.exists():
+        raise HTTPException(status_code=404, detail="File not found")
 
-        return FileResponse(
-            path=file_path, filename=file_path.name, media_type="application/pdf"
-        )
+    return FileResponse(
+        path=file_path, filename=file_path.name, media_type="application/pdf"
+    )
 
 
 # ============================================================================
 # API Endpoints - Statistics
 # ============================================================================
-@app.get(
-    "/users/me/stats",
-    dependencies=[Depends(verify_api_key)],
-    response_model=APIResponse,
-)
-def get_user_stats(
-    user_id: str = Depends(get_user_id), session: Session = Depends(get_session)
+@app.get("/users/me/stats", response_model=APIResponse, tags=["User Management"])
+async def get_user_stats(
+    api_key: str = Depends(verify_api_key),
+    user_id: str = Depends(get_user_id),
+    session: Session = Depends(get_session),
 ):
     """Get user-specific statistics"""
+    user = get_user_by_id(session, user_id)
+    if not user:
+        return APIResponse(
+            success=False, message="User not found", error="USER_NOT_FOUND"
+        )
+
     tasks = session.exec(
         select(TaskLog)
-        .where(TaskLog.user_id == user_id)
+        .where(TaskLog.user_profile_id == user.id)
         .order_by(TaskLog.created_at.desc())
         .limit(10)
     ).all()
@@ -2346,29 +2497,41 @@ def get_user_stats(
         [
             t.total_tokens
             for t in session.exec(
-                select(TaskLog).where(TaskLog.user_id == user_id)
+                select(TaskLog).where(TaskLog.user_profile_id == user.id)
             ).all()
         ]
     )
 
     recent_list = [
         {
-            "id": t.task_id,
+            "task_id": t.task_id,
             "type": t.task_type,
             "status": t.status,
-            "tokens": t.total_tokens,
-            "ai_model": t.ai_model,
-            "time": t.created_at.isoformat(),
+            "created_at": t.created_at.isoformat(),
         }
         for t in tasks
     ]
 
     return APIResponse(
         success=True,
-        message="Statistics retrieved successfully",
+        message="User statistics retrieved",
         data={
-            "total_tasks": len(recent_list),
+            "user_id": user_id,
+            "total_tasks": len(
+                session.exec(
+                    select(TaskLog).where(TaskLog.user_profile_id == user.id)
+                ).all()
+            ),
             "total_tokens_used": all_time_tokens,
             "recent_tasks": recent_list,
         },
     )
+
+
+# ============================================================================
+# Run the app
+# ============================================================================
+if __name__ == "__main__":
+    import uvicorn
+
+    uvicorn.run(app, host="0.0.0.0", port=8000)
