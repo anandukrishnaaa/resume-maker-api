@@ -49,8 +49,9 @@ logger = logging.getLogger(__name__)
 env = Env()
 env.read_env()
 
-OPENROUTER_API_KEY = env.str("OPENROUTER_API_KEY", "your-key-here")
-API_TOKEN = env.str("API_TOKEN", "secret-token-123")
+OPENROUTER_API_KEY = env.str("OPENROUTER_API_KEY")
+API_TOKEN = env.str("API_TOKEN")
+SQLITE_DATABASE_NAME = env.str("SQLITE_DATABASE_NAME", "local_database")
 
 # ============================================================================
 # FastAPI App Setup
@@ -528,7 +529,7 @@ class ResumeAnalysisRecord(SQLModel, table=True):
 # ============================================================================
 # Database & Session Management
 # ============================================================================
-DATABASE_URL = "sqlite:///./resume_generator.db"
+DATABASE_URL = f"sqlite:///./{SQLITE_DATABASE_NAME}.db"
 engine = create_engine(
     DATABASE_URL, echo=False, connect_args={"check_same_thread": False}
 )

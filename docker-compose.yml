@@ -1,0 +1,83 @@
+version: "3.8"
+
+services:
+  # FastAPI application server
+  api:
+    build: .
+    container_name: resume-generator-api
+    ports:
+      - "8000:8000"
+    environment:
+      - OPENROUTER_API_KEY=${OPENROUTER_API_KEY}
+      - API_TOKEN=${API_TOKEN}
+    volumes:
+      - resume-data:/app/data
+      - resume-output:/app/output
+      - resume-tmp:/app/tmp
+    command: uvicorn resume_generator:app --host 0.0.0.0 --port 8000 --workers 4
+    restart: always
+    deploy:
+      resources:
+        limits:
+          cpus: "2"
+          memory: 2G
+        reservations:
+          cpus: "1"
+          memory: 1G
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # Huey task worker
+  huey:
+    build: .
+    container_name: resume-generator-huey
+    environment:
+      - OPENROUTER_API_KEY=${OPENROUTER_API_KEY}
+      - API_TOKEN=${API_TOKEN}
+    volumes:
+      - resume-data:/app/data
+      - resume-output:/app/output
+      - resume-tmp:/app/tmp
+    command: huey_consumer resume_generator.huey -w 4 -k thread
+    restart: always
+    deploy:
+      resources:
+        limits:
+          cpus: "2"
+          memory: 2G
+        reservations:
+          cpus: "1"
+          memory: 1G
+    depends_on:
+      api:
+        condition: service_healthy
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  resume-data:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: /var/lib/resume-generator/data
+  resume-output:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: /var/lib/resume-generator/output
+  resume-tmp:
+    driver: local
