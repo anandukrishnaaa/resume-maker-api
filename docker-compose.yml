@@ -13,6 +13,7 @@ services:
       - SQLITE_DATABASE_NAME=${SQLITE_DATABASE_NAME:-local_database}
     volumes:
       - resume-data:/app/data
+      - resume-db:/app
       - resume-output:/app/output
       - resume-tmp:/app/tmp
     command: uvicorn resume_generator:app --host 0.0.0.0 --port 8000 --workers 4
@@ -61,6 +62,9 @@ services:
         reservations:
           cpus: "1"
           memory: 1G
+    depends_on:
+      api:
+        condition: service_healthy
     logging:
       driver: "json-file"
       options:
@@ -69,5 +73,6 @@ services:
 
 volumes:
   resume-data:
+  resume-db:
   resume-output:
   resume-tmp:
