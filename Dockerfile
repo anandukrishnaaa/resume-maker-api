@@ -4,11 +4,18 @@ FROM python:3.13-slim
 # Set working directory
 WORKDIR /app
 
-# Install system dependencies
+# Install system dependencies (including Typst for rendercv)
 RUN apt-get update && apt-get install -y \
     curl \
     build-essential \
+    wget \
     && rm -rf /var/lib/apt/lists/*
+
+# Install Typst (required for rendercv PDF generation)
+RUN wget https://github.com/typst/typst/releases/download/v0.11.0/typst-x86_64-unknown-linux-musl.tar.xz \
+    && tar -xf typst-x86_64-unknown-linux-musl.tar.xz \
+    && mv typst-x86_64-unknown-linux-musl/typst /usr/local/bin/ \
+    && rm -rf typst-x86_64-unknown-linux-musl*
 
 # Install uv
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
@@ -22,11 +29,10 @@ ENV PYTHONUNBUFFERED=1 \
 COPY pyproject.toml ./
 
 # Install dependencies using uv
-RUN uv pip install --system -r pyproject.toml
+RUN uv pip install --system --no-cache -r pyproject.toml
 
 # Copy application code
-COPY resume_generator.py .
-COPY .env* ./ 
+COPY *.py ./
 
 # Create necessary directories
 RUN mkdir -p /app/tmp /app/output /app/data

@@ -5,14 +5,14 @@ description = "Add your description here"
 readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [
-    "agno>=2.3.8",
-    "environs>=14.5.0",
-    "fastapi[standard]>=0.124.0",
-    "huey>=2.5.5",
-    "openai>=2.9.0",
-    "pyyaml>=6.0.3",
-    "rendercv[full]>=2.3",
-    "sqlmodel>=0.0.27",
+    "agno==2.3.8",
+    "environs==14.5.0",
+    "fastapi[standard]==0.124.0",
+    "huey==2.5.5",
+    "openai==2.9.0",
+    "pyyaml==6.0.3",
+    "rendercv[full]==2.3",
+    "sqlmodel==0.0.27",
 ]
 
 [tool.pytest.ini_options]
@@ -24,7 +24,7 @@ addopts = "-v --tb=short"
 
 [tool.uv]
 dev-dependencies = [
-    "pytest>=7.4.0",
-    "pytest-cov>=4.1.0",
-    "httpx>=0.25.0",
+    "pytest==7.4.0",
+    "pytest-cov==4.1.0",
+    "httpx==0.25.0",
 ]
