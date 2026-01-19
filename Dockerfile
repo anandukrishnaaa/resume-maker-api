@@ -4,18 +4,21 @@ FROM python:3.13-slim
 # Set working directory
 WORKDIR /app
 
-# Install system dependencies (including Typst for rendercv)
+# Install system dependencies
 RUN apt-get update && apt-get install -y \
     curl \
     build-essential \
     wget \
+    xz-utils \
     && rm -rf /var/lib/apt/lists/*
 
 # Install Typst (required for rendercv PDF generation)
-RUN wget https://github.com/typst/typst/releases/download/v0.11.0/typst-x86_64-unknown-linux-musl.tar.xz \
+RUN wget -q https://github.com/typst/typst/releases/download/v0.12.0/typst-x86_64-unknown-linux-musl.tar.xz \
     && tar -xf typst-x86_64-unknown-linux-musl.tar.xz \
-    && mv typst-x86_64-unknown-linux-musl/typst /usr/local/bin/ \
-    && rm -rf typst-x86_64-unknown-linux-musl*
+    && cp typst-x86_64-unknown-linux-musl/typst /usr/local/bin/ \
+    && chmod +x /usr/local/bin/typst \
+    && rm -rf typst-x86_64-unknown-linux-musl* \
+    && typst --version
 
 # Install uv
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv

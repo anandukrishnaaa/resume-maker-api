@@ -9,13 +9,8 @@ services:
       - "8000:8000"
     env_file:
       - ./app/.env
-    environment:
-      - SQLITE_DATABASE_NAME=${SQLITE_DATABASE_NAME:-local_database}
     volumes:
-      - resume-data:/app/data
-      - resume-db:/app
-      - resume-output:/app/output
-      - resume-tmp:/app/tmp
+      - resume-storage:/app
     command: uvicorn resume_generator:app --host 0.0.0.0 --port 8000 --workers 4
     restart: always
     deploy:
@@ -46,12 +41,8 @@ services:
     container_name: resume-generator-huey
     env_file:
       - ./app/.env
-    environment:
-      - SQLITE_DATABASE_NAME=${SQLITE_DATABASE_NAME:-local_database}
     volumes:
-      - resume-data:/app/data
-      - resume-output:/app/output
-      - resume-tmp:/app/tmp
+      - resume-storage:/app
     command: huey_consumer resume_generator.huey -w 4 -k thread
     restart: always
     deploy:
@@ -72,7 +63,4 @@ services:
         max-file: "3"
 
 volumes:
-  resume-data:
-  resume-db:
-  resume-output:
-  resume-tmp:
+  resume-storage:
